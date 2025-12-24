@@ -1,0 +1,452 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+🎤 VOICEVOX API クライアントモジュール
+非同期音声合成・話者管理・接続監視
+
+Features:
+✅ 完全非同期 aiohttp クライアント
+✅ 指数バックオフリトライ
+✅ 話者情報管理・カテゴリ分類
+✅ 高品質音声合成設定
+✅ 接続監視・自動復旧
+"""
+
+import asyncio
+import aiohttp
+import json
+import time
+from collections import defaultdict
+from datetime import datetime
+from typing import Dict, Any, Optional, List, Tuple
+
+from .config import VoiceSettings, SystemConfig, SpeakerInfo
+
+try:
+    from gyururu_utils.logger import get_gui_logger
+    logger = get_gui_logger(__name__)
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
+
+class VOICEVOXClient:
+    """
+    VOICEVOX API非同期クライアント
+    音声合成・話者管理・接続監視を統合
+    """
+    
+    def __init__(self, voicevox_url: str, voice_settings: VoiceSettings, system_config: SystemConfig):
+        """初期化"""
+        self.voicevox_url = voicevox_url.rstrip('/')
+        self.voice_settings = voice_settings
+        self.system_config = system_config
+        
+        # === 接続状態 ===
+        self.available = False
+        self.version = None
+        self.last_connection_check = 0
+        self.connection_retries = 0
+        
+        # === 話者管理 ===
+        self.speakers: Dict[int, SpeakerInfo] = {}
+        self.speaker_categories: Dict[str, List[int]] = defaultdict(list)
+        self.speakers_loaded = False
+        
+        # === セッション管理 ===
+        self.session: Optional[aiohttp.ClientSession] = None
+        self._session_lock = asyncio.Lock()
+        
+        # === 統計・パフォーマンス ===
+        self.synthesis_count = 0
+        self.synthesis_errors = 0
+        self.synthesis_times = []
+        self.error_history = []
+        
+        logger.info(f"🎤 VOICEVOX クライアント初期化: {self.voicevox_url}")
+    
+    async def initialize_async(self) -> bool:
+        """非同期初期化"""
+        try:
+            # セッション作成
+            await self._ensure_session()
+            
+            # 接続確認
+            connection_success = await self.check_connection()
+            if connection_success:
+                # 話者情報読み込み
+                await self.load_speakers()
+            
+            return connection_success
+            
+        except Exception as e:
+            logger.error(f"❌ VOICEVOX クライアント初期化エラー: {e}")
+            return False
+    
+    async def _ensure_session(self) -> None:
+        """セッション確保"""
+        async with self._session_lock:
+            if self.session is None or self.session.closed:
+                timeout = aiohttp.ClientTimeout(
+                    total=self.system_config.get("synthesis_timeout", 30)
+                )
+                self.session = aiohttp.ClientSession(
+                    timeout=timeout,
+                    connector=aiohttp.TCPConnector(limit=10, limit_per_host=5)
+                )
+                logger.debug("🔗 VOICEVOX HTTPセッション作成完了")
+    
+    async def check_connection(self) -> bool:
+        """接続確認（指数バックオフ対応）"""
+        max_attempts = self.system_config.get("retry_attempts", 3)
+        
+        for attempt in range(max_attempts):
+            try:
+                # 指数バックオフ計算
+                if attempt > 0:
+                    delay = self.system_config.get("retry_delay", 1.0)
+                    if self.system_config.get("retry_exponential_backoff", True):
+                        delay = delay * (2 ** (attempt - 1))
+                    await asyncio.sleep(delay)
+                
+                await self._ensure_session()
+                
+                # バージョン確認
+                async with self.session.get(f"{self.voicevox_url}/version") as response:
+                    if response.status == 200:
+                        version_text = await response.text()
+                        self.version = version_text.strip('"')
+                        self.available = True
+                        self.last_connection_check = time.time()
+                        self.connection_retries = 0
+                        
+                        logger.info(f"✅ VOICEVOX接続成功: {self.version}")
+                        return True
+                    else:
+                        raise aiohttp.ClientError(f"HTTP {response.status}")
+                        
+            except Exception as e:
+                self.connection_retries += 1
+                if attempt == max_attempts - 1:
+                    self.available = False
+                    self.version = None
+                    self._log_connection_error(e)
+                    return False
+                else:
+                    logger.warning(f"⚠️ VOICEVOX接続試行{attempt + 1}失敗: {e}")
+        
+        return False
+    
+    def _log_connection_error(self, error: Exception) -> None:
+        """接続エラーログ"""
+        error_msg = str(error).lower()
+        if "connection refused" in error_msg:
+            logger.error("❌ VOICEVOX接続拒否 - VOICEVOXが起動していない可能性があります")
+        elif "timeout" in error_msg:
+            logger.error("❌ VOICEVOX接続タイムアウト - ネットワークまたは負荷の問題の可能性があります")
+        elif "name or service not known" in error_msg:
+            logger.error("❌ VOICEVOX URLが無効です - 設定を確認してください")
+        else:
+            logger.error(f"❌ VOICEVOX接続エラー: {error}")
+    
+    async def load_speakers(self) -> bool:
+        """話者情報読み込み"""
+        try:
+            if not self.available:
+                logger.warning("⚠️ VOICEVOX接続未確立のため話者読み込みスキップ")
+                return False
+            
+            await self._ensure_session()
+            
+            async with self.session.get(f"{self.voicevox_url}/speakers") as response:
+                if response.status != 200:
+                    raise aiohttp.ClientError(f"話者情報取得失敗: HTTP {response.status}")
+                
+                speakers_data = await response.json()
+                
+                # 話者情報整理
+                self.speakers.clear()
+                self.speaker_categories.clear()
+                
+                for speaker in speakers_data:
+                    speaker_name = speaker.get("name", "Unknown")
+                    speaker_uuid = speaker.get("speaker_uuid", "")
+                    
+                    for style in speaker.get("styles", []):
+                        style_id = style.get("id")
+                        style_name = style.get("name", "Normal")
+                        full_name = f"{speaker_name} - {style_name}"
+                        category = self._categorize_speaker(speaker_name)
+                        
+                        # SpeakerInfo作成
+                        speaker_info = SpeakerInfo(
+                            id=style_id,
+                            name=full_name,
+                            speaker_name=speaker_name,
+                            style_name=style_name,
+                            speaker_uuid=speaker_uuid,
+                            category=category
+                        )
+                        
+                        self.speakers[style_id] = speaker_info
+                        self.speaker_categories[category].append(style_id)
+                
+                self.speakers_loaded = True
+                logger.info(f"🎭 話者情報読み込み完了: {len(self.speakers)}種類, {len(self.speaker_categories)}カテゴリ")
+                
+                # ぎゅるる音声確認
+                await self._verify_gyururu_voice()
+                
+                return True
+                
+        except Exception as e:
+            logger.error(f"❌ 話者情報読み込みエラー: {e}")
+            self.speakers_loaded = False
+            return False
+    
+    def _categorize_speaker(self, speaker_name: str) -> str:
+        """話者カテゴリ分類"""
+        name_lower = speaker_name.lower()
+        
+        # VOICEVOX系
+        if any(keyword in name_lower for keyword in ["ずんだもん", "四国めたん", "春日部つむぎ", "冥鳴ひまり"]):
+            return "VOICEVOX標準"
+        # ぎゅるる系
+        elif any(keyword in name_lower for keyword in ["小夜", "sayo"]):
+            return "ぎゅるる系"
+        # COEIROINK系
+        elif any(keyword in name_lower for keyword in ["つくよみちゃん", "明日香"]):
+            return "COEIROINK"
+        # ボイロ系
+        elif any(keyword in name_lower for keyword in ["琴葉", "結月", "紲星", "東北"]):
+            return "ボイロ"
+        # 商用系
+        elif any(keyword in name_lower for keyword in ["nemo", "アリアル"]):
+            return "商用"
+        else:
+            return "その他"
+    
+    async def _verify_gyururu_voice(self) -> None:
+        """ぎゅるる音声確認"""
+        gyururu_id = self.voice_settings.get("gyururu_voice_id", 46)
+        if gyururu_id in self.speakers:
+            speaker_info = self.speakers[gyururu_id]
+            logger.info(f"✅ ぎゅるる音声確認: {speaker_info.name} (ID:{gyururu_id})")
+        else:
+            logger.warning(f"⚠️ ぎゅるる音声ID {gyururu_id} が見つかりません")
+            # 代替音声提案
+            gyururu_category_speakers = self.speaker_categories.get("ぎゅるる系", [])
+            if gyururu_category_speakers:
+                alt_id = gyururu_category_speakers[0]
+                alt_speaker = self.speakers[alt_id]
+                logger.info(f"💡 代替音声提案: {alt_speaker.name} (ID:{alt_id})")
+    
+    async def synthesize_speech(self, text: str, voice_id: int) -> Optional[bytes]:
+        """音声合成実行"""
+        if not self.available:
+            logger.warning("⚠️ VOICEVOX接続未確立のため音声合成スキップ")
+            return None
+        
+        if not text or not text.strip():
+            logger.warning("⚠️ 音声テキストが空です")
+            return None
+        
+        synthesis_start = time.time()
+        
+        try:
+            await self._ensure_session()
+            
+            # 音声設定取得
+            speed = self.voice_settings.get("speed", 100) / 100.0
+            pitch = self.voice_settings.get("pitch", 100) / 100.0
+            volume = self.voice_settings.get("volume", 70) / 100.0
+            quality_mode = self.voice_settings.get("quality_mode", "high")
+            
+            # 音声クエリ作成
+            async with self.session.post(
+                f"{self.voicevox_url}/audio_query",
+                params={"text": text, "speaker": voice_id}
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    raise aiohttp.ClientError(f"音声クエリ作成失敗: HTTP {response.status} - {error_text}")
+                
+                audio_query = await response.json()
+            
+            # 高品質設定適用
+            audio_query["speedScale"] = speed
+            audio_query["pitchScale"] = pitch
+            audio_query["volumeScale"] = min(volume * 0.8, 0.8)  # 安全マージン
+            
+            # 品質モード設定
+            if quality_mode == "high":
+                audio_query["prePhonemeLength"] = 0.1
+                audio_query["postPhonemeLength"] = 0.1
+            elif quality_mode == "fast":
+                audio_query["prePhonemeLength"] = 0.05
+                audio_query["postPhonemeLength"] = 0.05
+            
+            # ノイズリダクション設定
+            if self.voice_settings.get("noise_reduction", True):
+                sample_rate = self.voice_settings.get("sample_rate", 44100)
+                audio_query["outputSamplingRate"] = sample_rate
+            
+            # 音声合成実行
+            async with self.session.post(
+                f"{self.voicevox_url}/synthesis",
+                params={"speaker": voice_id},
+                json=audio_query
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    raise aiohttp.ClientError(f"音声合成失敗: HTTP {response.status} - {error_text}")
+                
+                audio_data = await response.read()
+            
+            # 統計更新
+            synthesis_time = time.time() - synthesis_start
+            self.synthesis_times.append(synthesis_time)
+            self.synthesis_count += 1
+            
+            # 統計サイズ制限
+            if len(self.synthesis_times) > 100:
+                self.synthesis_times = self.synthesis_times[-50:]
+            
+            logger.debug(f"🎵 VOICEVOX音声合成完了: {len(audio_data)}bytes, {synthesis_time:.2f}s (ID:{voice_id})")
+            return audio_data
+            
+        except Exception as e:
+            synthesis_time = time.time() - synthesis_start
+            self.synthesis_errors += 1
+            self.error_history.append({
+                "timestamp": datetime.now().isoformat(),
+                "error": str(e),
+                "voice_id": voice_id,
+                "text_length": len(text),
+                "synthesis_time": synthesis_time
+            })
+            
+            # エラー履歴サイズ制限
+            if len(self.error_history) > 20:
+                self.error_history = self.error_history[-10:]
+            
+            logger.error(f"❌ VOICEVOX音声合成エラー (ID:{voice_id}): {e}")
+            return None
+    
+    async def test_synthesis(self, text: str = "VOICEVOX音声合成テストです", 
+                           voice_id: Optional[int] = None) -> bool:
+        """音声合成テスト"""
+        if voice_id is None:
+            voice_id = self.voice_settings.get("gyururu_voice_id", 46)
+        
+        logger.info(f"🧪 VOICEVOX合成テスト開始: '{text}' (ID:{voice_id})")
+        
+        audio_data = await self.synthesize_speech(text, voice_id)
+        
+        if audio_data:
+            logger.info(f"✅ VOICEVOX合成テスト成功: {len(audio_data)}bytes")
+            return True
+        else:
+            logger.error("❌ VOICEVOX合成テスト失敗")
+            return False
+    
+    # === 話者管理API ===
+    
+    def get_speakers(self) -> Dict[int, SpeakerInfo]:
+        """話者リスト取得"""
+        return self.speakers.copy()
+    
+    def get_speaker_info(self, voice_id: int) -> Optional[SpeakerInfo]:
+        """話者情報取得"""
+        return self.speakers.get(voice_id)
+    
+    def get_speaker_name(self, voice_id: int) -> str:
+        """話者名取得"""
+        speaker_info = self.speakers.get(voice_id)
+        if speaker_info:
+            return speaker_info.name
+        else:
+            return f"Unknown Speaker ({voice_id})"
+    
+    def get_speakers_by_category(self, category: str) -> List[SpeakerInfo]:
+        """カテゴリ別話者取得"""
+        speaker_ids = self.speaker_categories.get(category, [])
+        return [self.speakers[sid] for sid in speaker_ids if sid in self.speakers]
+    
+    def search_speakers(self, keyword: str) -> List[SpeakerInfo]:
+        """話者検索"""
+        keyword_lower = keyword.lower()
+        results = []
+        
+        for speaker_info in self.speakers.values():
+            if (keyword_lower in speaker_info.name.lower() or 
+                keyword_lower in speaker_info.speaker_name.lower() or
+                keyword_lower in speaker_info.style_name.lower()):
+                results.append(speaker_info)
+        
+        return results
+    
+    def get_categories(self) -> Dict[str, int]:
+        """カテゴリ統計取得"""
+        return {category: len(speaker_ids) for category, speaker_ids in self.speaker_categories.items()}
+    
+    # === 状態・統計取得API ===
+    
+    def get_connection_status(self) -> Dict[str, Any]:
+        """接続状態取得"""
+        return {
+            "available": self.available,
+            "version": self.version,
+            "url": self.voicevox_url,
+            "last_check": self.last_connection_check,
+            "connection_retries": self.connection_retries,
+            "speakers_loaded": self.speakers_loaded,
+            "total_speakers": len(self.speakers)
+        }
+    
+    def get_synthesis_stats(self) -> Dict[str, Any]:
+        """合成統計取得"""
+        avg_synthesis_time = 0
+        if self.synthesis_times:
+            avg_synthesis_time = sum(self.synthesis_times) / len(self.synthesis_times)
+        
+        success_rate = 0
+        total_attempts = self.synthesis_count + self.synthesis_errors
+        if total_attempts > 0:
+            success_rate = (self.synthesis_count / total_attempts) * 100
+        
+        return {
+            "total_synthesis": self.synthesis_count,
+            "total_errors": self.synthesis_errors,
+            "success_rate": round(success_rate, 2),
+            "average_synthesis_time": round(avg_synthesis_time, 3),
+            "recent_errors": self.error_history[-5:] if self.error_history else []
+        }
+    
+    # === クリーンアップ ===
+    
+    async def cleanup(self) -> None:
+        """クリーンアップ"""
+        try:
+            if self.session and not self.session.closed:
+                await self.session.close()
+                logger.debug("🧹 VOICEVOX HTTPセッションクローズ完了")
+            
+            # 統計リセット
+            self.speakers.clear()
+            self.speaker_categories.clear()
+            self.synthesis_times.clear()
+            self.error_history.clear()
+            
+            self.available = False
+            self.speakers_loaded = False
+            
+            logger.info("🧹 VOICEVOX クライアントクリーンアップ完了")
+            
+        except Exception as e:
+            logger.error(f"❌ VOICEVOX クリーンアップエラー: {e}")
+
+# === エクスポート ===
+
+__all__ = [
+    "VOICEVOXClient"
+]

@@ -1,0 +1,34 @@
+# テスト用OneCommeコメントファイル
+# WebSocketタブのOneComme統合システムテスト用
+
+[YouTube] テストユーザー1: こんにちはだぎゅる！
+[Twitch] StreamerTest: Hello everyone!
+[ツイキャス] 視聴者A: 配信お疲れ様です♪
+[ニコニコ] コメ主: 888888888
+[OPENREC] ゲーマー: ナイスプレイ！
+[Mildom] ミルダマー: 面白い配信ですね
+[SHOWROOM] ShowRoomUser: 今日も可愛いです！
+[ミラティブ] ミラ太郎: ゲーム上手いですね
+
+# JSON形式のテストデータ
+{"platform": "youtube", "username": "JSONユーザー", "comment": "JSON形式のテストコメントです"}
+{"platform": "twitch", "username": "TwitchUser", "comment": "Great stream! Keep it up!"}
+
+# サービス不明のコメント
+不明ユーザー: サービス不明のコメントです
+匿名: こんにちは
+
+# 特殊文字テスト
+[YouTube] 絵文字テスト: こんにちは😊✨🎮
+[Twitch] SpecialChar: Test with @#$%^&*()
+
+# 長いコメントテスト
+[YouTube] 長文ユーザー: これは非常に長いコメントのテストです。WebSocketタブのOneComme統合システムが正常に動作するかをチェックしています。
+
+# 空行テスト
+
+
+# コメント行（#で始まるため無視される）
+# この行は処理されません
+
+[ニコニコ] テスト完了: OneComme統合テスト完了だぎゅる！

@@ -1,0 +1,619 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+🚌 MessageBus 文字列イベント許容対応版
+'str' object has no attribute 'name' エラー解消
+
+🔥 Phase 3修正点:
+- ✅ 文字列イベント許容（Events定数 + 生文字列 両対応）
+- ✅ 'str' object has no attribute 'name' エラー解消
+- ✅ 後方互換性保持
+
+機能:
+- イベント発行・購読システム
+- 優先度管理
+- 非同期メッセージ処理
+- エラーハンドリング
+- 🔥 柔軟なイベント名処理
+"""
+
+import asyncio
+import json
+import time
+import threading
+import logging
+from datetime import datetime
+from typing import Dict, Any, List, Callable, Optional, Union
+from dataclasses import dataclass
+from collections import deque, defaultdict
+from enum import Enum
+import traceback
+
+# ロガー設定
+logger = logging.getLogger(__name__)
+
+class MessagePriority(Enum):
+    """メッセージ優先度定義"""
+    HIGH = "HIGH"
+    NORMAL = "NORMAL" 
+    LOW = "LOW"
+
+@dataclass
+class Message:
+    """メッセージデータ構造"""
+    event_type: str
+    data: Any
+    sender: str
+    priority: MessagePriority
+    timestamp: datetime
+    message_id: str = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """辞書形式変換"""
+        return {
+            'event_type': self.event_type,
+            'data': self.data,
+            'sender': self.sender,
+            'priority': self.priority.value,
+            'timestamp': self.timestamp.isoformat(),
+            'message_id': self.message_id
+        }
+
+
+class MessageBus:
+    """
+    MessageBus - Phase 3文字列イベント許容対応版
+    
+    🔥 修正点:
+    - publish()でEvents定数・生文字列両対応
+    - 'str' object has no attribute 'name' エラー解消
+    """
+    
+    def __init__(self, debug=False, max_queue_size=10000):
+        """
+        初期化
+        
+        Args:
+            debug: デバッグモード
+            max_queue_size: キュー最大サイズ
+        """
+        self.debug = debug
+        self.max_queue_size = max_queue_size
+        
+        # 購読者管理
+        self.subscribers: Dict[str, List[Callable]] = defaultdict(list)
+        
+        # メッセージキュー
+        self.message_queue = deque(maxlen=max_queue_size)
+        
+        # 処理統計
+        self.stats = {
+            'messages_published': 0,
+            'messages_processed': 0,
+            'errors_occurred': 0,
+            'start_time': datetime.now()
+        }
+        
+        # ワーカー管理
+        self.worker_running = False
+        self.worker_thread: Optional[threading.Thread] = None
+        
+        # 制御フラグ
+        self.running = False
+        
+        logger.info(f"🚀 MessageBus v16.2.0 初期化完了（debug={debug}, max_queue={max_queue_size}）")
+    
+    def start(self):
+        """MessageBus開始"""
+        if self.running:
+            logger.warning("⚠️ MessageBus既に実行中")
+            return
+        
+        self.running = True
+        self.worker_running = True
+        
+        # ワーカースレッド開始
+        self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
+        self.worker_thread.start()
+        
+        logger.info("🔄 MessageBus メッセージ処理開始")
+        logger.info("📡 MessageBus ワーカースレッド開始")
+    
+    def stop(self):
+        """MessageBus停止"""
+        self.running = False
+        self.worker_running = False
+        
+        if self.worker_thread and self.worker_thread.is_alive():
+            self.worker_thread.join(timeout=5.0)
+        
+        logger.info("🛑 MessageBus停止完了")
+    
+    def publish(self, event, data=None, priority=MessagePriority.NORMAL, sender="unknown"):
+        """
+        メッセージ発行 - Phase 3修正版
+        
+        🔥 修正: Events定数・生文字列両対応
+        
+        Args:
+            event: イベント (Events定数 または 文字列)
+            data: メッセージデータ
+            priority: 優先度
+            sender: 送信者
+        """
+        try:
+            # 🔥 Phase 3: 柔軟なイベント名処理
+            event_name = self._extract_event_name(event)
+            
+            # メッセージ作成
+            message = Message(
+                event_type=event_name,
+                data=data,
+                sender=sender,
+                priority=priority,
+                timestamp=datetime.now(),
+                message_id=f"{event_name}_{int(time.time() * 1000)}"
+            )
+            
+            # キューに追加
+            self.message_queue.append(message)
+            self.stats['messages_published'] += 1
+            
+            if self.debug:
+                logger.debug(f"📤 メッセージ発行: {event_name} from {sender}")
+            
+        except Exception as e:
+            logger.error(f"❌ メッセージ発行エラー: {e}")
+            self.stats['errors_occurred'] += 1
+    
+    def _extract_event_name(self, event: Union[str, Any]) -> str:
+        """
+        イベント名抽出 - Phase 3追加
+        
+        Events定数・生文字列・その他オブジェクト対応
+        'str' object has no attribute 'name' エラー解消
+        
+        Args:
+            event: イベント (任意の型)
+            
+        Returns:
+            str: イベント名文字列
+        """
+        # 文字列の場合はそのまま
+        if isinstance(event, str):
+            return event
+        
+        # .name属性がある場合（Enum等）
+        if hasattr(event, 'name'):
+            return str(event.name)
+        
+        # .value属性がある場合（Enum等）
+        if hasattr(event, 'value'):
+            return str(event.value)
+        
+        # その他の場合は文字列変換
+        return str(event)
+    
+    def subscribe(self, event_type: Union[str, Any], callback: Callable):
+        """
+        イベント購読 - Phase 3修正版
+        
+        Args:
+            event_type: イベントタイプ (Events定数 または 文字列)
+            callback: コールバック関数
+        """
+        try:
+            # 🔥 Phase 3: 柔軟なイベント名処理
+            event_name = self._extract_event_name(event_type)
+            
+            if callback not in self.subscribers[event_name]:
+                self.subscribers[event_name].append(callback)
+                
+                if self.debug:
+                    logger.debug(f"🔗 イベント購読: {event_name}")
+            
+        except Exception as e:
+            logger.error(f"❌ イベント購読エラー: {e}")
+    
+    def unsubscribe(self, event_type: Union[str, Any], callback: Callable):
+        """
+        イベント購読解除 - Phase 3修正版
+        
+        Args:
+            event_type: イベントタイプ (Events定数 または 文字列)
+            callback: コールバック関数
+        """
+        try:
+            # 🔥 Phase 3: 柔軟なイベント名処理
+            event_name = self._extract_event_name(event_type)
+            
+            if event_name in self.subscribers:
+                if callback in self.subscribers[event_name]:
+                    self.subscribers[event_name].remove(callback)
+                    
+                    if self.debug:
+                        logger.debug(f"🔌 イベント購読解除: {event_name}")
+            
+        except Exception as e:
+            logger.error(f"❌ イベント購読解除エラー: {e}")
+    
+    def _worker_loop(self):
+        """ワーカーループ（メッセージ処理）"""
+        while self.worker_running:
+            try:
+                if self.message_queue:
+                    message = self.message_queue.popleft()
+                    self._process_message(message)
+                else:
+                    time.sleep(0.01)  # CPUリソース節約
+                    
+            except Exception as e:
+                logger.error(f"❌ ワーカーループエラー: {e}")
+                self.stats['errors_occurred'] += 1
+    
+    def _process_message(self, message: Message):
+        """個別メッセージ処理"""
+        try:
+            event_type = message.event_type
+            subscribers = self.subscribers.get(event_type, [])
+            
+            if not subscribers:
+                if self.debug:
+                    logger.debug(f"📭 購読者なし: {event_type}")
+                return
+            
+            # 各購読者にメッセージ配信
+            for callback in subscribers:
+                try:
+                    # コールバック実行
+                    callback(message.data, message.sender)
+                    
+                    if self.debug:
+                        logger.debug(f"📨 メッセージ配信: {event_type} → {callback.__name__}")
+                        
+                except Exception as e:
+                    logger.error(f"❌ コールバック実行エラー ({event_type}): {e}")
+                    self.stats['errors_occurred'] += 1
+            
+            self.stats['messages_processed'] += 1
+            
+        except Exception as e:
+            logger.error(f"❌ メッセージ処理エラー: {e}")
+            self.stats['errors_occurred'] += 1
+    
+    # === 後方互換メソッド ===
+    
+    def emit(self, event, data=None, sender="unknown"):
+        """emit エイリアス（後方互換）"""
+        self.publish(event, data, MessagePriority.NORMAL, sender)
+    
+    def on(self, event_type, callback):
+        """on エイリアス（後方互換）"""
+        self.subscribe(event_type, callback)
+    
+    def off(self, event_type, callback):
+        """off エイリアス（後方互換）"""
+        self.unsubscribe(event_type, callback)
+    
+    # === 管理・監視機能 ===
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """統計情報取得"""
+        uptime = datetime.now() - self.stats['start_time']
+        
+        return {
+            'messages_published': self.stats['messages_published'],
+            'messages_processed': self.stats['messages_processed'],
+            'errors_occurred': self.stats['errors_occurred'],
+            'queue_size': len(self.message_queue),
+            'max_queue_size': self.max_queue_size,
+            'subscriber_count': sum(len(subs) for subs in self.subscribers.values()),
+            'event_types': len(self.subscribers),
+            'uptime_seconds': uptime.total_seconds(),
+            'worker_running': self.worker_running,
+            'running': self.running
+        }
+    
+    def get_subscribers(self) -> Dict[str, int]:
+        """購読者情報取得"""
+        return {event_type: len(subscribers) 
+                for event_type, subscribers in self.subscribers.items()}
+    
+    def clear_all_subscribers(self):
+        """全購読者クリア"""
+        self.subscribers.clear()
+        logger.info("🧹 全購読者クリア完了")
+    
+    def get_queue_status(self) -> Dict[str, Any]:
+        """キュー状態取得"""
+        queue_list = list(self.message_queue)
+        
+        # 優先度別集計
+        priority_counts = defaultdict(int)
+        for msg in queue_list:
+            priority_counts[msg.priority.value] += 1
+        
+        # 送信者別集計
+        sender_counts = defaultdict(int)
+        for msg in queue_list:
+            sender_counts[msg.sender] += 1
+        
+        return {
+            'current_size': len(queue_list),
+            'max_size': self.max_queue_size,
+            'utilization_percent': (len(queue_list) / self.max_queue_size) * 100,
+            'priority_breakdown': dict(priority_counts),
+            'sender_breakdown': dict(sender_counts),
+            'oldest_message_age_seconds': (
+                (datetime.now() - queue_list[0].timestamp).total_seconds()
+                if queue_list else 0
+            )
+        }
+    
+    def flush_queue(self):
+        """キューフラッシュ（強制処理）"""
+        processed_count = 0
+        
+        while self.message_queue:
+            message = self.message_queue.popleft()
+            self._process_message(message)
+            processed_count += 1
+        
+        logger.info(f"🔄 キューフラッシュ完了: {processed_count}件処理")
+        return processed_count
+    
+    # === デバッグ機能 ===
+    
+    def enable_debug(self):
+        """デバッグモード有効化"""
+        self.debug = True
+        logger.info("🔍 MessageBus デバッグモード有効")
+    
+    def disable_debug(self):
+        """デバッグモード無効化"""
+        self.debug = False
+        logger.info("🔍 MessageBus デバッグモード無効")
+    
+    def dump_state(self) -> Dict[str, Any]:
+        """状態ダンプ（デバッグ用）"""
+        return {
+            'stats': self.get_stats(),
+            'subscribers': self.get_subscribers(),
+            'queue_status': self.get_queue_status(),
+            'settings': {
+                'debug': self.debug,
+                'max_queue_size': self.max_queue_size
+            }
+        }
+    
+    # === Phase 3 新機能 ===
+    
+    def broadcast(self, data: Any, sender: str = "broadcast", priority: MessagePriority = MessagePriority.HIGH):
+        """
+        全イベントタイプにブロードキャスト - Phase 3追加
+        
+        Args:
+            data: ブロードキャストデータ
+            sender: 送信者
+            priority: 優先度
+        """
+        try:
+            broadcast_count = 0
+            
+            for event_type in self.subscribers.keys():
+                self.publish(event_type, data, priority, sender)
+                broadcast_count += 1
+            
+            logger.info(f"📡 ブロードキャスト実行: {broadcast_count}イベントタイプ")
+            
+        except Exception as e:
+            logger.error(f"❌ ブロードキャストエラー: {e}")
+    
+    def publish_delayed(self, event: Union[str, Any], data: Any, delay_seconds: float, 
+                      priority: MessagePriority = MessagePriority.NORMAL, sender: str = "delayed"):
+        """
+        遅延メッセージ発行 - Phase 3追加
+        
+        Args:
+            event: イベント
+            data: データ
+            delay_seconds: 遅延秒数
+            priority: 優先度
+            sender: 送信者
+        """
+        def delayed_publish():
+            time.sleep(delay_seconds)
+            self.publish(event, data, priority, sender)
+        
+        thread = threading.Thread(target=delayed_publish, daemon=True)
+        thread.start()
+        
+        logger.info(f"⏰ 遅延メッセージ設定: {delay_seconds}秒後 {self._extract_event_name(event)}")
+    
+    def get_event_history(self, event_type: Union[str, Any], limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        イベント履歴取得 - Phase 3追加
+        
+        Args:
+            event_type: イベントタイプ
+            limit: 取得件数
+            
+        Returns:
+            List[Dict]: イベント履歴
+        """
+        try:
+            event_name = self._extract_event_name(event_type)
+            
+            # キューから該当イベントを検索
+            history = []
+            for message in list(self.message_queue):
+                if message.event_type == event_name:
+                    history.append(message.to_dict())
+                    if len(history) >= limit:
+                        break
+            
+            return history
+            
+        except Exception as e:
+            logger.error(f"❌ イベント履歴取得エラー: {e}")
+            return []
+    
+    # === クリーンアップ ===
+    
+    def cleanup(self):
+        """MessageBusクリーンアップ"""
+        try:
+            logger.info("🧹 MessageBus クリーンアップ開始")
+            
+            # 停止
+            self.stop()
+            
+            # 残りメッセージ処理
+            remaining_count = self.flush_queue()
+            if remaining_count > 0:
+                logger.info(f"🔄 残りメッセージ処理: {remaining_count}件")
+            
+            # 購読者クリア
+            self.clear_all_subscribers()
+            
+            # 統計リセット
+            self.stats = {
+                'messages_published': 0,
+                'messages_processed': 0,
+                'errors_occurred': 0,
+                'start_time': datetime.now()
+            }
+            
+            logger.info("✅ MessageBus クリーンアップ完了")
+            
+        except Exception as e:
+            logger.error(f"❌ MessageBus クリーンアップエラー: {e}")
+
+
+# === ファクトリー関数 ===
+
+def create_message_bus(debug=False, max_queue_size=10000) -> MessageBus:
+    """
+    MessageBus作成関数 - Phase 3対応版
+    
+    Args:
+        debug: デバッグモード
+        max_queue_size: キュー最大サイズ
+        
+    Returns:
+        MessageBus: Phase 3対応MessageBusインスタンス
+    """
+    try:
+        bus = MessageBus(debug=debug, max_queue_size=max_queue_size)
+        bus.start()
+        
+        logger.info("✅ MessageBus Phase 3版 作成・開始完了")
+        return bus
+        
+    except Exception as e:
+        logger.error(f"❌ MessageBus作成エラー: {e}")
+        raise
+
+
+# === テスト関数 ===
+
+def test_message_bus():
+    """MessageBus Phase 3対応版テスト"""
+    print("🧪 MessageBus Phase 3文字列イベント許容テスト開始")
+    
+    try:
+        # MessageBus作成
+        bus = create_message_bus(debug=True)
+        
+        # 🔥 Phase 3: 混在イベントタイプテスト
+        test_events = {
+            'string_event': 'test_string_event',  # 生文字列
+            'enum_value': MessagePriority.HIGH,   # Enum
+            'object_with_name': type('TestEvent', (), {'name': 'test_object_event'})(),  # .name属性
+            'object_with_value': type('TestEvent', (), {'value': 'test_value_event'})(),  # .value属性
+            'plain_object': type('TestEvent', (), {})()  # その他オブジェクト
+        }
+        
+        # テスト用購読者
+        received_messages = []
+        
+        def test_subscriber(data, sender):
+            received_messages.append({
+                'data': data,
+                'sender': sender,
+                'timestamp': datetime.now()
+            })
+            print(f"📨 メッセージ受信: {data} from {sender}")
+        
+        # 🔥 Phase 3: 各イベントタイプで購読・発行テスト
+        print("\n=== Phase 3 イベントタイプ混在テスト ===")
+        
+        for test_name, event in test_events.items():
+            print(f"\n--- {test_name} テスト ---")
+            
+            # 購読
+            bus.subscribe(event, test_subscriber)
+            
+            # 発行
+            test_data = f"{test_name}_test_data"
+            bus.publish(event, test_data, sender=f"{test_name}_sender")
+            
+            # 少し待機（非同期処理）
+            time.sleep(0.1)
+        
+        # 統計確認
+        print("\n=== 統計確認 ===")
+        stats = bus.get_stats()
+        print(f"📊 発行メッセージ: {stats['messages_published']}")
+        print(f"📊 処理メッセージ: {stats['messages_processed']}")
+        print(f"📊 エラー数: {stats['errors_occurred']}")
+        print(f"📊 受信メッセージ: {len(received_messages)}")
+        
+        # 🔥 Phase 3: 新機能テスト
+        print("\n=== Phase 3 新機能テスト ===")
+        
+        # ブロードキャストテスト
+        bus.broadcast("ブロードキャストメッセージ", "broadcast_test")
+        time.sleep(0.1)
+        
+        # 遅延メッセージテスト
+        bus.publish_delayed("delayed_test", "遅延メッセージ", 0.5, sender="delay_test")
+        
+        # 状態ダンプ
+        state = bus.dump_state()
+        print(f"🔍 購読者数: {state['stats']['subscriber_count']}")
+        print(f"🔍 イベントタイプ数: {state['stats']['event_types']}")
+        
+        # 少し待機（遅延メッセージ処理）
+        time.sleep(1.0)
+        
+        # 最終統計
+        final_stats = bus.get_stats()
+        print(f"\n📊 最終統計:")
+        print(f"  発行: {final_stats['messages_published']}")
+        print(f"  処理: {final_stats['messages_processed']}")
+        print(f"  エラー: {final_stats['errors_occurred']}")
+        print(f"  受信: {len(received_messages)}")
+        
+        # クリーンアップ
+        bus.cleanup()
+        
+        print("\n✅ MessageBus Phase 3文字列イベント許容テスト完了")
+        print("🔥 主な成果:")
+        print("  ✅ 文字列イベント対応")
+        print("  ✅ Enumイベント対応") 
+        print("  ✅ オブジェクトイベント対応")
+        print("  ✅ 'str' object has no attribute 'name' エラー解消")
+        print("  ✅ 後方互換性保持")
+        
+        return len(received_messages) > 0 and final_stats['errors_occurred'] == 0
+        
+    except Exception as e:
+        print(f"❌ テストエラー: {e}")
+        print(f"❌ 詳細: {traceback.format_exc()}")
+        return False
+
+
+if __name__ == "__main__":
+    # テスト実行
+    test_message_bus()

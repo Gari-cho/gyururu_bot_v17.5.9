@@ -1,0 +1,759 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+🎮 WebSocketタブ 接続制御パネル v17.0.0 Phase5
+SlideSwitch統合・5サービス制御UI
+
+機能:
+- SlideSwitch UI統合
+- 5サービス制御（onecomme, messagebus, bouyomi, voicevox, obs）
+- ステータス表示・更新
+- 統計情報表示
+- フォールバック機能
+"""
+
+import tkinter as tk
+from tkinter import ttk
+from datetime import datetime
+import logging
+from typing import Dict, Any, Callable, Optional
+
+# SlideSwitch読み込み（フォールバック付き）
+try:
+    from .slide_switch import create_slide_switch, update_slide_switch_appearance, animate_slide_switch
+    SLIDE_SWITCH_AVAILABLE = True
+except ImportError:
+    SLIDE_SWITCH_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
+
+
+class ConnectionControlPanel:
+    """
+    接続制御パネル専用クラス
+    
+    SlideSwitch統合・5サービス制御・ステータス表示を担当
+    """
+    
+    def __init__(self, services, settings, callbacks=None):
+        """
+        初期化
+        
+        Args:
+            services: サービス状態辞書
+            settings: 設定辞書
+            callbacks: コールバック辞書（オプション）
+        """
+        self.services = services
+        self.settings = settings
+        self.callbacks = callbacks or {}
+        
+        # UI要素管理
+        self.parent_frame = None
+        self.main_panel = None
+        self.services_frame = None
+        self.stats_frame = None
+        
+        # SlideSwitch管理
+        self.slide_switches = {}
+        self.toggle_switches = {}
+        self.status_labels = {}
+        self.detail_labels = {}
+        
+        # 統計表示
+        self.stats_label = None
+        self.phase_info_label = None
+        
+        # サービス設定
+        self.service_configs = [
+            {'key': 'onecomme', 'icon': '📡', 'name': 'わんコメ　　　', 'description': 'コメント受信'},
+            {'key': 'messagebus', 'icon': '🚌', 'name': 'MessageBus　', 'description': 'メッセージ中継'},
+            {'key': 'bouyomi', 'icon': '🎵', 'name': '棒読みちゃん　', 'description': '音声読み上げ'},
+            {'key': 'voicevox', 'icon': '🎤', 'name': 'VOICEVOX　　', 'description': 'AI音声合成'},
+            {'key': 'obs', 'icon': '📺', 'name': 'OBS　　　　　', 'description': '配信ソフト連携'}
+        ]
+        
+        logger.info("🎮 ConnectionControlPanel初期化完了")
+    
+    def create_in_parent(self, parent):
+        """親フレーム内にパネル作成"""
+        try:
+            self.parent_frame = parent
+            
+            # メインパネル作成
+            self._create_main_panel()
+            
+            # サービス制御エリア作成
+            self._create_services_area()
+            
+            # 統計情報エリア作成
+            self._create_statistics_area()
+            
+            # Phase情報エリア作成
+            self._create_phase_info_area()
+            
+            logger.info("✅ 接続制御パネル作成完了")
+            
+        except Exception as e:
+            logger.error(f"❌ 接続制御パネル作成エラー: {e}")
+            raise
+    
+    def _create_main_panel(self):
+        """メインパネル作成"""
+        try:
+            self.main_panel = ttk.LabelFrame(
+                self.parent_frame, 
+                text="🌐 サービス接続状態 (Phase5 - モジュラー設計・SlideSwitch統合)"
+            )
+            self.main_panel.pack(fill=tk.X, pady=(0, 20))
+            
+        except Exception as e:
+            logger.error(f"❌ メインパネル作成エラー: {e}")
+            raise
+    
+    def _create_services_area(self):
+        """サービス制御エリア作成"""
+        try:
+            self.services_frame = ttk.Frame(self.main_panel)
+            self.services_frame.pack(fill=tk.X, padx=20, pady=20)
+            
+            # 各サービス制御行を作成
+            for i, config in enumerate(self.service_configs):
+                self._create_service_control_row(config, i)
+            
+        except Exception as e:
+            logger.error(f"❌ サービス制御エリア作成エラー: {e}")
+    
+    def _create_service_control_row(self, config, row_index):
+        """サービス制御行作成（SlideSwitch統合）"""
+        try:
+            service_key = config['key']
+            
+            # 行フレーム
+            row_frame = ttk.Frame(self.services_frame)
+            row_frame.pack(fill=tk.X, pady=5)
+            
+            # アイコン
+            icon_label = ttk.Label(
+                row_frame, 
+                text=config['icon'], 
+                font=("Yu Gothic UI", 16)
+            )
+            icon_label.pack(side=tk.LEFT, padx=(0, 10))
+            
+            # サービス名
+            name_label = ttk.Label(
+                row_frame, 
+                text=config['name'], 
+                font=("Yu Gothic UI", 12, "bold")
+            )
+            name_label.pack(side=tk.LEFT, padx=(0, 20))
+            
+            # SlideSwitch または フォールバック
+            self._create_service_toggle(row_frame, service_key)
+            
+            # ステータスラベル
+            status_label = ttk.Label(
+                row_frame, 
+                text="⚪無効", 
+                font=("Yu Gothic UI", 10)
+            )
+            status_label.pack(side=tk.LEFT, padx=(0, 15))
+            self.status_labels[service_key] = status_label
+            
+            # 詳細ラベル
+            detail_label = ttk.Label(
+                row_frame, 
+                text=config['description'], 
+                font=("Yu Gothic UI", 9), 
+                foreground="gray"
+            )
+            detail_label.pack(side=tk.LEFT, padx=(0, 10))
+            self.detail_labels[service_key] = detail_label
+            
+            # 制御ボタン（追加機能）
+            self._create_service_controls(row_frame, service_key)
+            
+            logger.debug(f"✅ {service_key} 制御行作成完了")
+            
+        except Exception as e:
+            logger.error(f"❌ {service_key} 制御行作成エラー: {e}")
+    
+    def _create_service_toggle(self, parent, service_key):
+        """サービストグル作成（SlideSwitch優先）"""
+        try:
+            if SLIDE_SWITCH_AVAILABLE:
+                # SlideSwitch使用
+                self._create_slide_switch_toggle(parent, service_key)
+            else:
+                # フォールバック：通常のCheckbutton
+                self._create_fallback_toggle(parent, service_key)
+                
+        except Exception as e:
+            logger.error(f"❌ {service_key} トグル作成エラー: {e}")
+            self._create_fallback_toggle(parent, service_key)
+    
+    def _create_slide_switch_toggle(self, parent, service_key):
+        """SlideSwitch作成"""
+        try:
+            # トグル変数作成
+            toggle_var = tk.BooleanVar()
+            initial_state = self.settings.get(f'auto_start_{service_key}', True)
+            toggle_var.set(initial_state)
+            
+            # SlideSwitch作成
+            slide_switch = create_slide_switch(
+                parent,
+                service_key,
+                toggle_var,
+                self._on_slide_switch_changed
+            )
+            slide_switch.pack(side=tk.LEFT, padx=(0, 20))
+            
+            # 初期外観設定
+            update_slide_switch_appearance(slide_switch, initial_state)
+            
+            # 保存
+            self.slide_switches[service_key] = slide_switch
+            self.toggle_switches[service_key] = toggle_var
+            
+            # サービス状態初期化
+            if service_key in self.services:
+                self.services[service_key].enabled = initial_state
+            
+            logger.debug(f"✅ {service_key} SlideSwitch作成完了")
+            
+        except Exception as e:
+            logger.error(f"❌ {service_key} SlideSwitch作成エラー: {e}")
+            raise
+    
+    def _create_fallback_toggle(self, parent, service_key):
+        """フォールバックトグル作成"""
+        try:
+            # トグル変数作成
+            toggle_var = tk.BooleanVar()
+            initial_state = self.settings.get(f'auto_start_{service_key}', True)
+            toggle_var.set(initial_state)
+            
+            # Checkbutton作成
+            toggle_button = ttk.Checkbutton(
+                parent,
+                text="有効",
+                variable=toggle_var,
+                command=lambda: self._on_toggle_changed(service_key, toggle_var.get())
+            )
+            toggle_button.pack(side=tk.LEFT, padx=(0, 20))
+            
+            # 保存
+            self.toggle_switches[service_key] = toggle_var
+            
+            # サービス状態初期化
+            if service_key in self.services:
+                self.services[service_key].enabled = initial_state
+            
+            logger.debug(f"✅ {service_key} フォールバックトグル作成完了")
+            
+        except Exception as e:
+            logger.error(f"❌ {service_key} フォールバックトグル作成エラー: {e}")
+    
+    def _create_service_controls(self, parent, service_key):
+        """サービス追加制御作成"""
+        try:
+            # 再接続ボタン
+            reconnect_btn = ttk.Button(
+                parent,
+                text="🔄",
+                width=3,
+                command=lambda: self._on_service_action(service_key, 'reconnect')
+            )
+            reconnect_btn.pack(side=tk.RIGHT, padx=(5, 0))
+            
+            # 設定ボタン
+            config_btn = ttk.Button(
+                parent,
+                text="⚙️",
+                width=3,
+                command=lambda: self._on_service_action(service_key, 'config')
+            )
+            config_btn.pack(side=tk.RIGHT, padx=(5, 0))
+            
+        except Exception as e:
+            logger.error(f"❌ {service_key} 追加制御作成エラー: {e}")
+    
+    def _create_statistics_area(self):
+        """統計情報エリア作成"""
+        try:
+            self.stats_frame = ttk.Frame(self.main_panel)
+            self.stats_frame.pack(fill=tk.X, padx=20, pady=(10, 20))
+            
+            # 統計ラベル
+            self.stats_label = ttk.Label(
+                self.stats_frame,
+                text="📊 統計: 読み込み中...",
+                font=("Yu Gothic UI", 11)
+            )
+            self.stats_label.pack(anchor="w")
+            
+        except Exception as e:
+            logger.error(f"❌ 統計情報エリア作成エラー: {e}")
+    
+    def _create_phase_info_area(self):
+        """Phase情報エリア作成"""
+        try:
+            phase_frame = ttk.Frame(self.main_panel)
+            phase_frame.pack(fill=tk.X, padx=20, pady=(5, 15))
+            
+            # Phase5情報表示
+            phase_text = self._generate_phase_info()
+            
+            self.phase_info_label = ttk.Label(
+                phase_frame,
+                text=phase_text,
+                font=("Yu Gothic UI", 9),
+                foreground="blue"
+            )
+            self.phase_info_label.pack(anchor="w")
+            
+        except Exception as e:
+            logger.error(f"❌ Phase情報エリア作成エラー: {e}")
+    
+    def _generate_phase_info(self):
+        """Phase情報生成"""
+        try:
+            modules_status = []
+            
+            # SlideSwitch状況
+            modules_status.append(f"SlideSwitch {'✅' if SLIDE_SWITCH_AVAILABLE else '❌'}")
+            
+            # 外部モジュール状況チェック
+            module_checks = [
+                ('WebSocketManager', 'handler'),
+                ('MessageBridge', 'message_bridge'),
+                ('ConnectionState', 'connection_state'),
+                ('Events外部化', 'shared.event_types'),
+                ('Mock分離', 'test_mocks')
+            ]
+            
+            for name, module_name in module_checks:
+                try:
+                    __import__(module_name)
+                    modules_status.append(f"{name} ✅")
+                except ImportError:
+                    modules_status.append(f"{name} ❌")
+            
+            return f"🔧 Phase5 モジュラー設計: {' | '.join(modules_status)}"
+            
+        except Exception as e:
+            logger.error(f"❌ Phase情報生成エラー: {e}")
+            return "🔧 Phase5 モジュラー設計: 情報取得エラー"
+    
+    # === イベントハンドラー ===
+    
+    def _on_slide_switch_changed(self, service_key, enabled):
+        """SlideSwitch変更イベント"""
+        try:
+            logger.info(f"🔄 SlideSwitch変更: {service_key} = {enabled}")
+            
+            # 外観更新
+            if service_key in self.slide_switches:
+                update_slide_switch_appearance(self.slide_switches[service_key], enabled)
+            
+            # 共通トグル処理
+            self._on_toggle_changed(service_key, enabled)
+            
+        except Exception as e:
+            logger.error(f"❌ SlideSwitch変更エラー ({service_key}): {e}")
+    
+    def _on_toggle_changed(self, service_key, enabled):
+        """トグル変更共通処理"""
+        try:
+            # サービス状態更新
+            if service_key in self.services:
+                self.services[service_key].enabled = enabled
+            
+            # 設定更新
+            self.settings[f'auto_start_{service_key}'] = enabled
+            
+            # コールバック実行
+            callback = self.callbacks.get('service_toggle')
+            if callback:
+                callback(service_key, enabled)
+            else:
+                logger.warning(f"⚠️ service_toggle コールバック未設定 ({service_key})")
+            
+            logger.info(f"🔄 サービストグル: {service_key} = {enabled}")
+            
+        except Exception as e:
+            logger.error(f"❌ トグル変更エラー ({service_key}): {e}")
+    
+    def _on_service_action(self, service_key, action):
+        """サービスアクションイベント"""
+        try:
+            logger.info(f"🎮 サービスアクション: {service_key} - {action}")
+            
+            # コールバック実行
+            callback = self.callbacks.get('service_action')
+            if callback:
+                callback(service_key, action)
+            else:
+                logger.warning(f"⚠️ service_action コールバック未設定 ({service_key}, {action})")
+            
+        except Exception as e:
+            logger.error(f"❌ サービスアクションエラー ({service_key}, {action}): {e}")
+    
+    # === 更新メソッド ===
+    
+    def update_all_services(self):
+        """全サービス状態更新"""
+        try:
+            for service_key in self.services:
+                self.update_service_status(service_key)
+                
+        except Exception as e:
+            logger.error(f"❌ 全サービス状態更新エラー: {e}")
+    
+    def update_service_status(self, service_key):
+        """個別サービス状態更新"""
+        try:
+            if service_key not in self.services:
+                return
+            
+            service = self.services[service_key]
+            
+            # ステータステキスト・色決定
+            if hasattr(service, 'auto_recovery_in_progress') and service.auto_recovery_in_progress:
+                status_text = "🔄確認中"
+                status_color = "orange"
+            elif service.connected and service.enabled:
+                status_text = "✅接続中"
+                status_color = "green"
+            elif service.enabled and not service.connected:
+                status_text = "❌未接続"
+                status_color = "red"
+            else:
+                status_text = "⚪無効"
+                status_color = "gray"
+            
+            # ステータスラベル更新
+            if service_key in self.status_labels:
+                current_text = self.status_labels[service_key].cget("text")
+                if current_text != status_text:
+                    self.status_labels[service_key].config(text=status_text, foreground=status_color)
+            
+            # 詳細ラベル更新
+            if service_key in self.detail_labels and hasattr(service, 'details'):
+                current_details = self.detail_labels[service_key].cget("text")
+                if current_details != service.details:
+                    self.detail_labels[service_key].config(text=service.details)
+            
+            # SlideSwitch外観更新
+            if SLIDE_SWITCH_AVAILABLE and service_key in self.slide_switches:
+                try:
+                    update_slide_switch_appearance(self.slide_switches[service_key], service.enabled)
+                except Exception as e:
+                    logger.error(f"❌ SlideSwitch外観更新エラー ({service_key}): {e}")
+            
+        except Exception as e:
+            logger.error(f"❌ サービス状態更新エラー ({service_key}): {e}")
+    
+    def update_statistics(self, stats):
+        """統計表示更新"""
+        try:
+            if not self.stats_label:
+                return
+            
+            # 統計テキスト生成
+            stats_text = self._generate_stats_text(stats)
+            
+            # ラベル更新
+            current_text = self.stats_label.cget("text")
+            if current_text != stats_text:
+                self.stats_label.config(text=stats_text)
+                
+        except Exception as e:
+            logger.error(f"❌ 統計表示更新エラー: {e}")
+    
+    def _generate_stats_text(self, stats):
+        """統計テキスト生成"""
+        try:
+            return (f"📊 統計: onecomme {stats.get('onecomme_comments', 0)}件 | "
+                   f"MessageBus {stats.get('messagebus_sent', 0)}件送信 | "
+                   f"エラー {stats.get('errors', 0)}件 | "
+                   f"自動復旧 {stats.get('auto_recovery_count', 0)}回 | "
+                   f"同期成功 {stats.get('sync_success_count', 0)}件 | "
+                   f"UI更新 {stats.get('ui_updates', 0)}回 | "
+                   f"SlideSwitch {'✅' if SLIDE_SWITCH_AVAILABLE else '❌'}")
+                   
+        except Exception as e:
+            logger.error(f"❌ 統計テキスト生成エラー: {e}")
+            return "📊 統計: エラーが発生しました"
+    
+    def update_phase_info(self):
+        """Phase情報更新"""
+        try:
+            if not self.phase_info_label:
+                return
+                
+            phase_text = self._generate_phase_info()
+            current_text = self.phase_info_label.cget("text")
+            if current_text != phase_text:
+                self.phase_info_label.config(text=phase_text)
+                
+        except Exception as e:
+            logger.error(f"❌ Phase情報更新エラー: {e}")
+    
+    # === 制御メソッド ===
+    
+    def set_service_enabled(self, service_key, enabled):
+        """サービス有効状態設定"""
+        try:
+            if service_key in self.toggle_switches:
+                self.toggle_switches[service_key].set(enabled)
+                
+            if service_key in self.services:
+                self.services[service_key].enabled = enabled
+                
+            # UI更新
+            self.update_service_status(service_key)
+            
+        except Exception as e:
+            logger.error(f"❌ サービス有効状態設定エラー ({service_key}): {e}")
+    
+    def get_service_enabled(self, service_key):
+        """サービス有効状態取得"""
+        try:
+            if service_key in self.toggle_switches:
+                return self.toggle_switches[service_key].get()
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ サービス有効状態取得エラー ({service_key}): {e}")
+            return False
+    
+    def animate_service_toggle(self, service_key, to_enabled):
+        """サービストグルアニメーション"""
+        try:
+            if SLIDE_SWITCH_AVAILABLE and service_key in self.slide_switches:
+                animate_slide_switch(self.slide_switches[service_key], to_enabled)
+            else:
+                # フォールバック：即座に状態変更
+                self.set_service_enabled(service_key, to_enabled)
+                
+        except Exception as e:
+            logger.error(f"❌ サービストグルアニメーションエラー ({service_key}): {e}")
+    
+    # === コールバック管理 ===
+    
+    def set_callback(self, event_name, callback):
+        """コールバック設定"""
+        self.callbacks[event_name] = callback
+        logger.debug(f"📋 コールバック設定: {event_name}")
+    
+    def get_callback(self, event_name):
+        """コールバック取得"""
+        return self.callbacks.get(event_name)
+    
+    def clear_callbacks(self):
+        """コールバッククリア"""
+        self.callbacks.clear()
+        logger.debug("📋 コールバッククリア完了")
+    
+    # === ユーティリティ ===
+    
+    def get_all_service_states(self):
+        """全サービス状態取得"""
+        try:
+            states = {}
+            for service_key in self.services:
+                states[service_key] = {
+                    'enabled': self.get_service_enabled(service_key),
+                    'connected': getattr(self.services[service_key], 'connected', False),
+                    'details': getattr(self.services[service_key], 'details', ''),
+                    'auto_recovery': getattr(self.services[service_key], 'auto_recovery_in_progress', False)
+                }
+            return states
+            
+        except Exception as e:
+            logger.error(f"❌ 全サービス状態取得エラー: {e}")
+            return {}
+    
+    def refresh_all_displays(self):
+        """全表示要素リフレッシュ"""
+        try:
+            # サービス状態更新
+            self.update_all_services()
+            
+            # Phase情報更新
+            self.update_phase_info()
+            
+            logger.debug("🔄 表示リフレッシュ完了")
+            
+        except Exception as e:
+            logger.error(f"❌ 表示リフレッシュエラー: {e}")
+    
+    # === クリーンアップ ===
+    
+    def cleanup(self):
+        """パネルクリーンアップ"""
+        try:
+            logger.info("🧹 ConnectionControlPanel クリーンアップ開始")
+            
+            # コールバッククリア
+            self.clear_callbacks()
+            
+            # UI要素クリア
+            self.slide_switches.clear()
+            self.toggle_switches.clear()
+            self.status_labels.clear()
+            self.detail_labels.clear()
+            
+            logger.info("✅ ConnectionControlPanel クリーンアップ完了")
+            
+        except Exception as e:
+            logger.error(f"❌ パネルクリーンアップエラー: {e}")
+    
+    def get_status(self):
+        """パネル状態取得"""
+        try:
+            return {
+                'panel_created': self.main_panel is not None,
+                'slide_switches_count': len(self.slide_switches),
+                'toggle_switches_count': len(self.toggle_switches),
+                'slide_switch_available': SLIDE_SWITCH_AVAILABLE,
+                'services_count': len(self.services),
+                'callbacks_count': len(self.callbacks),
+                'service_states': self.get_all_service_states()
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ パネル状態取得エラー: {e}")
+            return {'error': str(e)}
+
+
+# === ファクトリー関数 ===
+
+def create_connection_control_panel(services, settings, callbacks=None):
+    """
+    ConnectionControlPanel作成関数
+    
+    Args:
+        services: サービス状態辞書
+        settings: 設定辞書
+        callbacks: コールバック辞書（オプション）
+        
+    Returns:
+        ConnectionControlPanel: 接続制御パネルインスタンス
+    """
+    try:
+        panel = ConnectionControlPanel(services, settings, callbacks)
+        logger.info("✅ ConnectionControlPanel作成完了")
+        return panel
+        
+    except Exception as e:
+        logger.error(f"❌ ConnectionControlPanel作成エラー: {e}")
+        raise
+
+
+# === テスト関数 ===
+
+def test_connection_control_panel():
+    """ConnectionControlPanelテスト関数"""
+    print("🧪 ConnectionControlPanelテスト開始")
+    
+    try:
+        # テストウィンドウ作成
+        root = tk.Tk()
+        root.title("ConnectionControlPanel テスト")
+        root.geometry("900x500")
+        
+        # テスト用データ作成
+        test_services = {}
+        for config in [
+            {'key': 'onecomme'}, {'key': 'messagebus'}, 
+            {'key': 'bouyomi'}, {'key': 'voicevox'}, {'key': 'obs'}
+        ]:
+            service_key = config['key']
+            test_services[service_key] = type('Service', (), {
+                'enabled': True,
+                'connected': service_key == 'messagebus',  # messagebusのみ接続済み
+                'details': f'{service_key} テスト状態',
+                'auto_recovery_in_progress': False
+            })()
+        
+        test_settings = {
+            'auto_start_onecomme': True,
+            'auto_start_messagebus': True,
+            'auto_start_bouyomi': False,
+            'auto_start_voicevox': False,
+            'auto_start_obs': True
+        }
+        
+        # テスト用コールバック
+        def test_toggle_callback(service_key, enabled):
+            print(f"🔄 テストコールバック - {service_key}: {enabled}")
+        
+        def test_action_callback(service_key, action):
+            print(f"🎮 テストアクション - {service_key}: {action}")
+        
+        test_callbacks = {
+            'service_toggle': test_toggle_callback,
+            'service_action': test_action_callback
+        }
+        
+        # パネル作成
+        panel = create_connection_control_panel(test_services, test_settings, test_callbacks)
+        panel.create_in_parent(root)
+        
+        # 統計データでテスト
+        test_stats = {
+            'onecomme_comments': 125,
+            'messagebus_sent': 67,
+            'errors': 2,
+            'auto_recovery_count': 1,
+            'sync_success_count': 45,
+            'ui_updates': 123
+        }
+        panel.update_statistics(test_stats)
+        
+        # 定期更新テスト
+        def periodic_update():
+            try:
+                panel.update_all_services()
+                root.after(2000, periodic_update)  # 2秒ごと
+            except:
+                pass
+        
+        periodic_update()
+        
+        # 状態確認
+        status = panel.get_status()
+        print(f"📊 パネル状態: {status}")
+        
+        # 終了処理
+        def on_closing():
+            try:
+                panel.cleanup()
+                root.destroy()
+            except Exception as e:
+                print(f"❌ 終了処理エラー: {e}")
+                root.destroy()
+        
+        root.protocol("WM_DELETE_WINDOW", on_closing)
+        
+        print("🚀 パネルテスト開始 - ウィンドウを閉じて終了")
+        root.mainloop()
+        
+        print("✅ ConnectionControlPanelテスト完了")
+        return True
+        
+    except Exception as e:
+        print(f"❌ テストエラー: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+if __name__ == "__main__":
+    # テスト実行
+    test_connection_control_panel()
+            

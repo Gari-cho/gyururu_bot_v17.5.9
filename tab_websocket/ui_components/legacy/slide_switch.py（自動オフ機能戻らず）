@@ -1,0 +1,459 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+🎮 SlideSwitch UI Component v16 Phase2
+自動OFF機能付きスライドスイッチ - 完全版
+
+元のslide_switch.pyにPhase2機能を統合した完全版
+既存のslide_switch.pyをこのファイルで置き換えてください
+
+Phase2での追加機能:
+- delay_off() メソッド - 指定秒数後に自動OFF
+- animate_to_off() - スムーズな自動OFF アニメーション
+- cancel_delayed_off() - 自動OFF のキャンセル
+- set_switch_warning_state() - 警告状態表示
+- get_switch_status() - 詳細状態取得
+- 接続失敗時の自動復旧UI対応
+"""
+
+import tkinter as tk
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def create_slide_switch(frame, service_key, toggle_var, on_toggle_callback):
+    """
+    SlideSwitch作成関数（Phase2強化版）
+    
+    Args:
+        frame: 親フレーム
+        service_key: サービスキー
+        toggle_var: トグル変数
+        on_toggle_callback: トグル変更コールバック
+        
+    Returns:
+        switch_frame: SlideSwitch フレーム
+    """
+    try:
+        switch_frame = tk.Frame(frame, bg="#444444", width=50, height=25)
+        switch_frame.pack_propagate(False)
+
+        canvas = tk.Canvas(switch_frame, width=50, height=25, highlightthickness=0, bg="#444444")
+        canvas.pack(fill=tk.BOTH, expand=True)
+
+        # ノブの描画
+        knob = canvas.create_oval(2, 2, 23, 23, fill="#ffffff", outline="#cccccc")
+        
+        # Phase2: 追加属性
+        switch_frame.knob = knob
+        switch_frame.canvas = canvas
+        switch_frame.service_key = service_key
+        switch_frame.toggle_var = toggle_var
+        switch_frame.callback = on_toggle_callback
+        switch_frame.delayed_off_job = None  # 自動OFF ジョブID
+        switch_frame.is_auto_changing = False  # 自動変更中フラグ
+        
+        def on_click(event=None):
+            # 自動変更中は手動操作を無視
+            if switch_frame.is_auto_changing:
+                return
+                
+            toggle_var.set(not toggle_var.get())
+            if on_toggle_callback:
+                on_toggle_callback(service_key, toggle_var.get())
+
+        canvas.bind("<Button-1>", on_click)
+        canvas.bind("<Enter>", lambda e: canvas.config(cursor="hand2"))
+        
+        logger.debug(f"✅ SlideSwitch作成完了: {service_key}")
+        return switch_frame
+        
+    except Exception as e:
+        logger.error(f"❌ SlideSwitch作成エラー ({service_key}): {e}")
+        raise
+
+
+def update_slide_switch_appearance(switch_frame, is_on):
+    """
+    SlideSwitch外観更新（Phase2強化版）
+    
+    Args:
+        switch_frame: SlideSwitch フレーム
+        is_on: ON/OFF 状態
+    """
+    try:
+        canvas = switch_frame.canvas
+        
+        if is_on:
+            # ON状態: 緑背景、ノブを右に
+            canvas.config(bg="#66bb6a")  # 緑
+            canvas.coords(switch_frame.knob, 25, 2, 47, 23)
+        else:
+            # OFF状態: 赤背景、ノブを左に
+            canvas.config(bg="#e57373")  # 赤
+            canvas.coords(switch_frame.knob, 2, 2, 23, 23)
+            
+        # toggle_var も同期
+        if hasattr(switch_frame, 'toggle_var'):
+            switch_frame.toggle_var.set(is_on)
+            
+        logger.debug(f"🔄 SlideSwitch外観更新: {switch_frame.service_key} = {is_on}")
+        
+    except Exception as e:
+        logger.error(f"❌ SlideSwitch外観更新エラー: {e}")
+
+
+def animate_slide_switch(switch_frame, to_on=True, step=0):
+    """
+    SlideSwitch アニメーション（既存機能）
+    
+    Args:
+        switch_frame: SlideSwitch フレーム
+        to_on: アニメーション方向（True=ON, False=OFF）
+        step: アニメーションステップ
+    """
+    try:
+        canvas = switch_frame.canvas
+        knob = switch_frame.knob
+        
+        if to_on:
+            x1 = min(2 + step, 25)
+            x2 = x1 + 21
+            if x1 >= 25:
+                update_slide_switch_appearance(switch_frame, True)
+                return
+        else:
+            x1 = max(25 - step, 2)
+            x2 = x1 + 21
+            if x1 <= 2:
+                update_slide_switch_appearance(switch_frame, False)
+                return
+
+        canvas.coords(knob, x1, 2, x2, 23)
+        switch_frame.after(10, lambda: animate_slide_switch(switch_frame, to_on, step + 2))
+        
+    except Exception as e:
+        logger.error(f"❌ SlideSwitch アニメーションエラー: {e}")
+
+
+# ===== Phase2 新機能: 自動OFF関連 =====
+
+def delay_off(switch_frame, delay_seconds=3):
+    """
+    指定秒数後に自動OFF（Phase2新機能）
+    
+    Args:
+        switch_frame: SlideSwitch フレーム
+        delay_seconds: 遅延秒数（デフォルト: 3秒）
+    """
+    try:
+        # 既存の自動OFF ジョブをキャンセル
+        cancel_delayed_off(switch_frame)
+        
+        service_key = getattr(switch_frame, 'service_key', 'unknown')
+        logger.info(f"⏰ {service_key} 自動OFF開始 - {delay_seconds}秒後に実行")
+        
+        def turn_off():
+            try:
+                # 自動変更中フラグを設定
+                switch_frame.is_auto_changing = True
+                
+                # 外観をOFFに変更（アニメーション付き）
+                animate_to_off(switch_frame)
+                
+                # toggle_var をOFFに設定
+                if hasattr(switch_frame, 'toggle_var'):
+                    switch_frame.toggle_var.set(False)
+                
+                # コールバック呼び出し
+                if hasattr(switch_frame, 'callback') and switch_frame.callback:
+                    switch_frame.callback(switch_frame.service_key, False)
+                
+                # 自動変更中フラグをクリア（少し遅延）
+                switch_frame.after(500, lambda: setattr(switch_frame, 'is_auto_changing', False))
+                
+                # ジョブIDクリア
+                switch_frame.delayed_off_job = None
+                
+                logger.info(f"✅ {service_key} 自動OFF完了")
+                
+            except Exception as e:
+                logger.error(f"❌ 自動OFF実行エラー ({service_key}): {e}")
+                # エラー時もフラグをクリア
+                switch_frame.is_auto_changing = False
+        
+        # 自動OFF ジョブをスケジュール
+        switch_frame.delayed_off_job = switch_frame.after(delay_seconds * 1000, turn_off)
+        
+    except Exception as e:
+        logger.error(f"❌ 自動OFF設定エラー: {e}")
+
+
+def animate_to_off(switch_frame):
+    """
+    OFFへのスムーズアニメーション（Phase2新機能）
+    
+    Args:
+        switch_frame: SlideSwitch フレーム
+    """
+    try:
+        canvas = switch_frame.canvas
+        
+        # 背景を警告色（オレンジ）に一瞬変更
+        canvas.config(bg="#ff9800")  # オレンジ
+        
+        # 200ms後に通常のOFFアニメーション開始
+        switch_frame.after(200, lambda: animate_slide_switch(switch_frame, to_on=False))
+        
+    except Exception as e:
+        logger.error(f"❌ OFFアニメーションエラー: {e}")
+
+
+def cancel_delayed_off(switch_frame):
+    """
+    自動OFF のキャンセル（Phase2新機能）
+    
+    Args:
+        switch_frame: SlideSwitch フレーム
+    """
+    try:
+        if hasattr(switch_frame, 'delayed_off_job') and switch_frame.delayed_off_job:
+            switch_frame.after_cancel(switch_frame.delayed_off_job)
+            switch_frame.delayed_off_job = None
+            
+            service_key = getattr(switch_frame, 'service_key', 'unknown')
+            logger.debug(f"⏰ {service_key} 自動OFF キャンセル")
+            
+    except Exception as e:
+        logger.error(f"❌ 自動OFF キャンセルエラー: {e}")
+
+
+def set_switch_warning_state(switch_frame, is_warning=True):
+    """
+    SlideSwitch を警告状態に設定（Phase2新機能）
+    
+    Args:
+        switch_frame: SlideSwitch フレーム
+        is_warning: 警告状態かどうか
+    """
+    try:
+        canvas = switch_frame.canvas
+        
+        if is_warning:
+            # 警告状態: オレンジ背景で点滅
+            canvas.config(bg="#ff9800")  # オレンジ
+            
+            def blink():
+                if hasattr(switch_frame, 'is_warning') and switch_frame.is_warning:
+                    current_bg = canvas.cget("bg")
+                    new_bg = "#ff9800" if current_bg == "#ffcc80" else "#ffcc80"  # オレンジ系で点滅
+                    canvas.config(bg=new_bg)
+                    switch_frame.after(500, blink)  # 0.5秒間隔で点滅
+            
+            switch_frame.is_warning = True
+            blink()
+            
+        else:
+            # 警告状態解除: 通常の状態に戻す
+            switch_frame.is_warning = False
+            is_on = switch_frame.toggle_var.get() if hasattr(switch_frame, 'toggle_var') else False
+            update_slide_switch_appearance(switch_frame, is_on)
+            
+        service_key = getattr(switch_frame, 'service_key', 'unknown')
+        logger.debug(f"⚠️ {service_key} 警告状態: {is_warning}")
+        
+    except Exception as e:
+        logger.error(f"❌ 警告状態設定エラー: {e}")
+
+
+def get_switch_status(switch_frame):
+    """
+    SlideSwitch の詳細状態取得（Phase2新機能）
+    
+    Args:
+        switch_frame: SlideSwitch フレーム
+        
+    Returns:
+        dict: 状態辞書
+    """
+    try:
+        return {
+            'service_key': getattr(switch_frame, 'service_key', 'unknown'),
+            'is_on': switch_frame.toggle_var.get() if hasattr(switch_frame, 'toggle_var') else False,
+            'is_auto_changing': getattr(switch_frame, 'is_auto_changing', False),
+            'has_delayed_off': getattr(switch_frame, 'delayed_off_job', None) is not None,
+            'is_warning': getattr(switch_frame, 'is_warning', False)
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ SlideSwitch状態取得エラー: {e}")
+        return {'error': str(e)}
+
+
+# ===== テスト用関数 =====
+
+def test_slide_switch_with_auto_off():
+    """SlideSwitch自動OFF機能テスト"""
+    print("🧪 SlideSwitch Phase2 自動OFF機能テスト開始")
+    
+    try:
+        # テストウィンドウ作成
+        root = tk.Tk()
+        root.title("SlideSwitch Phase2 テスト")
+        root.geometry("400x300")
+        
+        # テストフレーム
+        test_frame = tk.Frame(root)
+        test_frame.pack(pady=20)
+        
+        # タイトル
+        title_label = tk.Label(test_frame, text="🎮 SlideSwitch Phase2 自動OFF テスト", font=("Yu Gothic UI", 14, "bold"))
+        title_label.pack(pady=10)
+        
+        # テスト用SlideSwitch作成
+        switch_frame_container = tk.Frame(test_frame)
+        switch_frame_container.pack(pady=20)
+        
+        # サービス名ラベル
+        service_label = tk.Label(switch_frame_container, text="テストサービス:", font=("Yu Gothic UI", 12))
+        service_label.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # SlideSwitch作成
+        toggle_var = tk.BooleanVar(value=True)
+        
+        def test_callback(service_key, enabled):
+            print(f"🔄 テストコールバック: {service_key} = {enabled}")
+            status_label.config(text=f"状態: {'ON' if enabled else 'OFF'}")
+        
+        slide_switch = create_slide_switch(
+            switch_frame_container,
+            "test_service",
+            toggle_var,
+            test_callback
+        )
+        slide_switch.pack(side=tk.LEFT, padx=10)
+        
+        # 状態表示ラベル
+        status_label = tk.Label(switch_frame_container, text="状態: ON", font=("Yu Gothic UI", 10))
+        status_label.pack(side=tk.LEFT, padx=(10, 0))
+        
+        # 初期外観設定
+        update_slide_switch_appearance(slide_switch, True)
+        
+        # テストボタンエリア
+        button_frame = tk.Frame(test_frame)
+        button_frame.pack(pady=20)
+        
+        # 自動OFF テストボタン
+        def test_auto_off():
+            print("⏰ 3秒後自動OFF テスト実行")
+            delay_off(slide_switch, 3)
+        
+        auto_off_btn = tk.Button(button_frame, text="⏰ 3秒後自動OFF", command=test_auto_off)
+        auto_off_btn.pack(side=tk.LEFT, padx=5)
+        
+        # キャンセルボタン
+        def test_cancel():
+            print("⏰ 自動OFF キャンセル")
+            cancel_delayed_off(slide_switch)
+        
+        cancel_btn = tk.Button(button_frame, text="⏰ キャンセル", command=test_cancel)
+        cancel_btn.pack(side=tk.LEFT, padx=5)
+        
+        # 警告状態テストボタン
+        def test_warning():
+            is_warning = not getattr(slide_switch, 'is_warning', False)
+            print(f"⚠️ 警告状態テスト: {is_warning}")
+            set_switch_warning_state(slide_switch, is_warning)
+        
+        warning_btn = tk.Button(button_frame, text="⚠️ 警告状態切替", command=test_warning)
+        warning_btn.pack(side=tk.LEFT, padx=5)
+        
+        # 状態確認ボタン
+        def check_status():
+            status = get_switch_status(slide_switch)
+            print(f"📊 SlideSwitch状態: {status}")
+        
+        status_btn = tk.Button(button_frame, text="📊 状態確認", command=check_status)
+        status_btn.pack(side=tk.LEFT, padx=5)
+        
+        # 情報表示エリア
+        info_frame = tk.LabelFrame(test_frame, text="テスト機能")
+        info_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        info_text = """Phase2 新機能:
+• delay_off() - 指定秒数後に自動OFF
+• animate_to_off() - OFFアニメーション
+• cancel_delayed_off() - 自動OFFキャンセル
+• set_switch_warning_state() - 警告状態表示
+• get_switch_status() - 詳細状態取得
+
+使用方法:
+1. [3秒後自動OFF] - 自動OFF実行テスト
+2. [キャンセル] - 自動OFFのキャンセル
+3. [警告状態切替] - 警告表示のテスト
+4. [状態確認] - コンソールに状態出力"""
+
+        info_label = tk.Label(info_frame, text=info_text, justify=tk.LEFT, font=("Yu Gothic UI", 9))
+        info_label.pack(padx=10, pady=10)
+        
+        print("✅ SlideSwitch Phase2 テスト準備完了")
+        print("🎮 テスト方法:")
+        print("  1. [3秒後自動OFF] ボタンでテスト実行")
+        print("  2. [キャンセル] ボタンでキャンセルテスト")
+        print("  3. [警告状態切替] で警告表示テスト")
+        print("  4. SlideSwitch直接クリックで手動操作テスト")
+        
+        # ウィンドウ終了処理
+        def on_closing():
+            try:
+                cancel_delayed_off(slide_switch)
+                root.destroy()
+            except Exception as e:
+                print(f"❌ テスト終了エラー: {e}")
+                root.destroy()
+        
+        root.protocol("WM_DELETE_WINDOW", on_closing)
+        
+        print("🚀 SlideSwitch Phase2 テスト開始 - ウィンドウを閉じて終了")
+        root.mainloop()
+        
+        print("✅ SlideSwitch Phase2 テスト完了")
+        return True
+        
+    except Exception as e:
+        print(f"❌ テストエラー: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+if __name__ == "__main__":
+    # テスト実行
+    test_slide_switch_with_auto_off()
+
+
+# === ✅ 統合関数: スライドスイッチ一括制御 ===
+
+
+def set_slide_switch_state(switch_frame, state: bool, log_widget=None, message: str = ""):
+    """
+    スライドスイッチの状態を一括変更（内部状態・UI・ログ反映）
+
+    Args:
+        switch_frame: スイッチの外枠（Frame）
+        state (bool): TrueでON, FalseでOFF
+        log_widget: ログ表示用のScrolledTextなど（任意）
+        message (str): 表示メッセージ（任意）
+    """
+    try:
+        switch_var = getattr(switch_frame, "toggle_var", None)
+        if switch_var:
+            switch_var.set(state)
+        update_slide_switch_appearance(switch_frame, state)
+        if log_widget and message:
+            log_widget.insert("end", f"⚠️ {message}\n")
+            log_widget.see("end")
+    except Exception as e:
+        print(f"❌ set_slide_switch_stateエラー: {e}")

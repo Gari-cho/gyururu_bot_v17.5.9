@@ -1,0 +1,15 @@
+﻿__pycache__/
+*.pyc
+
+.env
+.env.*
+unified_config.json
+local_config.json
+
+dist/
+build/
+*.exe
+
+logs/
+
+tab_obs_effects/overlay_out/

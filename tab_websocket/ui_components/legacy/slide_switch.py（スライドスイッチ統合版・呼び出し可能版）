@@ -1,0 +1,528 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+🎮 再利用可能なSlideSwitch v17.0.0 - 汎用版
+複数タブ対応・テーマ設定・完全独立設計
+"""
+
+import tkinter as tk
+from tkinter import ttk
+import threading
+import time
+from typing import Callable, Optional, Dict, Any
+
+class SlideSwitch(tk.Frame):
+    """
+    再利用可能なSlideSwitch クラス
+    
+    特徴:
+    - 完全独立設計（他のクラスに依存しない）
+    - テーマ設定対応
+    - 自動OFF機能内蔵
+    - 警告状態表示
+    - 複数インスタンス対応
+    """
+    
+    # デフォルトテーマ
+    DEFAULT_THEMES = {
+        'default': {
+            'bg_on': '#4CAF50',
+            'bg_off': '#f44336', 
+            'bg_disabled': '#bdc3c7',
+            'bg_warning': '#ff9800',
+            'text_on': 'ON',
+            'text_off': 'OFF',
+            'text_color': '#ffffff',
+            'font_family': 'Yu Gothic UI',
+            'font_size': 10,
+            'font_weight': 'bold',
+            'width': 60,
+            'height': 30
+        },
+        'compact': {
+            'bg_on': '#27ae60',
+            'bg_off': '#e74c3c',
+            'bg_disabled': '#95a5a6',
+            'bg_warning': '#f39c12',
+            'text_on': '●',
+            'text_off': '○',
+            'text_color': '#ffffff',
+            'font_family': 'Arial',
+            'font_size': 14,
+            'font_weight': 'bold',
+            'width': 40,
+            'height': 25
+        },
+        'professional': {
+            'bg_on': '#2ecc71',
+            'bg_off': '#34495e',
+            'bg_disabled': '#7f8c8d',
+            'bg_warning': '#e67e22',
+            'text_on': '有効',
+            'text_off': '無効',
+            'text_color': '#ffffff',
+            'font_family': 'Meiryo',
+            'font_size': 9,
+            'font_weight': 'normal',
+            'width': 70,
+            'height': 28
+        }
+    }
+    
+    def __init__(self, parent, 
+                 initial_value: bool = False,
+                 callback: Optional[Callable[[bool], None]] = None,
+                 theme: str = 'default',
+                 custom_theme: Optional[Dict[str, Any]] = None,
+                 service_key: Optional[str] = None,
+                 **kwargs):
+        """
+        SlideSwitch初期化
+        
+        Args:
+            parent: 親ウィジェット
+            initial_value: 初期状態
+            callback: 状態変更コールバック
+            theme: テーマ名 ('default', 'compact', 'professional')
+            custom_theme: カスタムテーマ辞書
+            service_key: サービス識別キー（コールバック用）
+            **kwargs: 追加設定
+        """
+        super().__init__(parent, **kwargs)
+        
+        # 基本設定
+        self.state = initial_value
+        self.callback = callback
+        self.service_key = service_key
+        self.enabled = True
+        self.warning_mode = False
+        
+        # テーマ設定
+        self.theme = self._setup_theme(theme, custom_theme)
+        
+        # 自動OFF機能
+        self._auto_off_timer = None
+        self._auto_off_delay = 3000  # デフォルト3秒
+        
+        # 接続中アニメーション
+        self._connecting_animation = False
+        self._animation_timer = None
+        self._animation_state = 0
+        
+        # UI作成
+        self._create_ui()
+        self._update_appearance()
+    
+    def _setup_theme(self, theme_name: str, custom_theme: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """テーマ設定"""
+        if custom_theme:
+            return custom_theme
+        elif theme_name in self.DEFAULT_THEMES:
+            return self.DEFAULT_THEMES[theme_name].copy()
+        else:
+            return self.DEFAULT_THEMES['default'].copy()
+    
+    def _create_ui(self):
+        """UI作成"""
+        # スイッチボタン
+        self.switch_button = tk.Button(
+            self,
+            command=self._on_click,
+            relief=tk.FLAT,
+            bd=0,
+            cursor='hand2'
+        )
+        self.switch_button.pack(expand=True, fill=tk.BOTH)
+        
+        # サイズ設定
+        self.configure(
+            width=self.theme['width'],
+            height=self.theme['height']
+        )
+    
+    def _on_click(self):
+        """クリックイベント"""
+        if not self.enabled:
+            return
+        
+        # 状態反転
+        self.set_state(not self.state)
+    
+    def set_state(self, new_state: bool, trigger_callback: bool = True):
+        """
+        状態設定
+        
+        Args:
+            new_state: 新しい状態
+            trigger_callback: コールバック実行フラグ
+        """
+        if self.state != new_state:
+            self.state = new_state
+            self._update_appearance()
+            
+            # コールバック実行
+            if trigger_callback and self.callback:
+                try:
+                    if self.service_key:
+                        self.callback(self.service_key, new_state)
+                    else:
+                        self.callback(new_state)
+                except Exception as e:
+                    print(f"❌ SlideSwitch コールバックエラー: {e}")
+    
+    def get_state(self) -> bool:
+        """状態取得"""
+        return self.state
+    
+    def set_enabled(self, enabled: bool):
+        """有効/無効設定"""
+        self.enabled = enabled
+        self._update_appearance()
+    
+    def is_enabled(self) -> bool:
+        """有効状態取得"""
+        return self.enabled
+    
+    def show_warning(self, warning: bool = True):
+        """警告状態表示"""
+        self.warning_mode = warning
+        self._update_appearance()
+    
+    def _update_appearance(self):
+        """外観更新"""
+        if not hasattr(self, 'switch_button'):
+            return
+        
+        # 色・テキスト決定
+        if not self.enabled:
+            bg_color = self.theme['bg_disabled']
+            text = self.theme['text_off']
+        elif self.warning_mode:
+            bg_color = self.theme['bg_warning']
+            text = '⚠️'
+        elif self.state:
+            bg_color = self.theme['bg_on']
+            text = self.theme['text_on']
+        else:
+            bg_color = self.theme['bg_off']
+            text = self.theme['text_off']
+        
+        # 外観適用
+        self.switch_button.configure(
+            bg=bg_color,
+            activebackground=bg_color,
+            fg=self.theme['text_color'],
+            activeforeground=self.theme['text_color'],
+            text=text,
+            font=(
+                self.theme['font_family'],
+                self.theme['font_size'],
+                self.theme['font_weight']
+            )
+        )
+    
+    # === 自動OFF機能 ===
+    
+    def auto_off(self, delay_ms: int = 3000):
+        """
+        自動OFF設定
+        
+        Args:
+            delay_ms: 遅延時間（ミリ秒）
+        """
+        self._auto_off_delay = delay_ms
+        self._start_auto_off_timer()
+    
+    def _start_auto_off_timer(self):
+        """自動OFFタイマー開始"""
+        self.cancel_auto_off()  # 既存タイマーキャンセル
+        
+        self._auto_off_timer = self.after(
+            self._auto_off_delay,
+            self._execute_auto_off
+        )
+        
+        # 警告状態表示
+        self.show_warning(True)
+    
+    def _execute_auto_off(self):
+        """自動OFF実行"""
+        self.set_state(False)
+        self.show_warning(False)
+        self._auto_off_timer = None
+    
+    def cancel_auto_off(self):
+        """自動OFFキャンセル"""
+        if self._auto_off_timer:
+            self.after_cancel(self._auto_off_timer)
+            self._auto_off_timer = None
+        
+        self.show_warning(False)
+    
+    # === 接続中アニメーション ===
+    
+    def set_connecting_state(self, connecting: bool = True):
+        """接続中状態設定"""
+        if connecting:
+            self._start_connecting_animation()
+        else:
+            self._stop_connecting_animation()
+    
+    def _start_connecting_animation(self):
+        """接続中アニメーション開始"""
+        self._connecting_animation = True
+        self._animation_state = 0
+        self._animate_connecting()
+    
+    def _animate_connecting(self):
+        """接続中アニメーション実行"""
+        if not self._connecting_animation:
+            return
+        
+        # アニメーション状態更新
+        self._animation_state = (self._animation_state + 1) % 4
+        animation_chars = ['⟳', '⟲', '⟳', '⟲']
+        
+        # 表示更新
+        if hasattr(self, 'switch_button'):
+            self.switch_button.configure(
+                text=animation_chars[self._animation_state],
+                bg=self.theme['bg_warning']
+            )
+        
+        # 次回アニメーション
+        self._animation_timer = self.after(500, self._animate_connecting)
+    
+    def _stop_connecting_animation(self):
+        """接続中アニメーション停止"""
+        self._connecting_animation = False
+        
+        if self._animation_timer:
+            self.after_cancel(self._animation_timer)
+            self._animation_timer = None
+        
+        # 通常表示に戻す
+        self._update_appearance()
+    
+    def stop_connecting_animation(self):
+        """外部用アニメーション停止"""
+        self._stop_connecting_animation()
+    
+    # === テーマ変更 ===
+    
+    def change_theme(self, theme_name: str = None, custom_theme: Dict[str, Any] = None):
+        """テーマ変更"""
+        self.theme = self._setup_theme(theme_name or 'default', custom_theme)
+        
+        # サイズ更新
+        self.configure(
+            width=self.theme['width'],
+            height=self.theme['height']
+        )
+        
+        # 外観更新
+        self._update_appearance()
+    
+    # === ユーティリティ ===
+    
+    def get_info(self) -> Dict[str, Any]:
+        """SlideSwitch情報取得"""
+        return {
+            'state': self.state,
+            'enabled': self.enabled,
+            'warning_mode': self.warning_mode,
+            'service_key': self.service_key,
+            'theme': self.theme.get('name', 'custom'),
+            'auto_off_active': self._auto_off_timer is not None,
+            'connecting_animation': self._connecting_animation
+        }
+    
+    def reset(self):
+        """状態リセット"""
+        self.cancel_auto_off()
+        self._stop_connecting_animation()
+        self.show_warning(False)
+        self.set_enabled(True)
+        self.set_state(False, trigger_callback=False)
+    
+    # === クリーンアップ ===
+    
+    def cleanup(self):
+        """クリーンアップ"""
+        self.cancel_auto_off()
+        self._stop_connecting_animation()
+        self.callback = None
+
+
+# === 汎用ヘルパー関数 ===
+
+def create_slide_switch(parent, service_key: str = None, initial_state: bool = False, 
+                       callback: Callable = None, theme: str = 'default', **kwargs) -> SlideSwitch:
+    """
+    SlideSwitch作成ヘルパー関数（従来互換性）
+    """
+    return SlideSwitch(
+        parent=parent,
+        initial_value=initial_state,
+        callback=callback,
+        theme=theme,
+        service_key=service_key,
+        **kwargs
+    )
+
+
+def create_themed_slide_switch(parent, theme_config: Dict[str, Any], **kwargs) -> SlideSwitch:
+    """
+    テーマ指定SlideSwitch作成
+    """
+    return SlideSwitch(
+        parent=parent,
+        custom_theme=theme_config,
+        **kwargs
+    )
+
+
+# === AutoConnectionManager（統合版） ===
+
+class AutoConnectionManager:
+    """
+    自動接続管理（SlideSwitch統合版）
+    """
+    
+    def __init__(self):
+        self.connection_callback = None
+        self.active_connections = {}
+    
+    def set_connection_callback(self, callback: Callable[[str], bool]):
+        """接続テストコールバック設定"""
+        self.connection_callback = callback
+    
+    def start_auto_connection(self, slide_switch: SlideSwitch, service_key: str):
+        """自動接続開始"""
+        if not self.connection_callback:
+            print(f"⚠️ {service_key}: 接続コールバック未設定")
+            return
+        
+        # 接続中表示開始
+        slide_switch.set_connecting_state(True)
+        
+        # 非同期で接続テスト実行
+        def test_connection():
+            try:
+                success = self.connection_callback(service_key)
+                
+                # メインスレッドで結果処理
+                slide_switch.after(0, lambda: self._handle_connection_result(
+                    slide_switch, service_key, success
+                ))
+                
+            except Exception as e:
+                print(f"❌ {service_key} 接続テストエラー: {e}")
+                slide_switch.after(0, lambda: self._handle_connection_result(
+                    slide_switch, service_key, False
+                ))
+        
+        # 別スレッドで実行
+        threading.Thread(target=test_connection, daemon=True).start()
+    
+    def _handle_connection_result(self, slide_switch: SlideSwitch, service_key: str, success: bool):
+        """接続結果処理"""
+        slide_switch.stop_connecting_animation()
+        
+        if success:
+            print(f"✅ {service_key} 接続成功")
+        else:
+            print(f"❌ {service_key} 接続失敗 - 3秒後自動OFF")
+            slide_switch.auto_off(3000)
+
+
+# === 統合制御関数（新版Phase2） ===
+
+def set_slide_switch_state(slide_switch: SlideSwitch, state: bool, 
+                          log_widget=None, message: str = ""):
+    """
+    SlideSwitch統合制御関数
+    
+    Args:
+        slide_switch: SlideSwitchインスタンス
+        state: 設定状態
+        log_widget: ログウィジェット（オプション）
+        message: ログメッセージ
+    """
+    try:
+        slide_switch.set_state(state)
+        
+        if log_widget and message:
+            timestamp = time.strftime("%H:%M:%S")
+            log_message = f"[{timestamp}] {message}\n"
+            log_widget.insert(tk.END, log_message)
+            log_widget.see(tk.END)
+            
+    except Exception as e:
+        print(f"❌ SlideSwitch制御エラー: {e}")
+
+
+# === テスト・デモ用（分離） ===
+
+def run_slideswitch_demo():
+    """SlideSwitch デモ実行"""
+    print("🧪 SlideSwitch 汎用版デモ開始")
+    
+    root = tk.Tk()
+    root.title("SlideSwitch 汎用版デモ")
+    root.geometry("600x400")
+    
+    # デモ用コールバック
+    def demo_callback(service_key, state):
+        print(f"🔄 {service_key}: {state}")
+    
+    # 複数テーマのSlideSwitch作成
+    themes = ['default', 'compact', 'professional']
+    switches = {}
+    
+    for i, theme in enumerate(themes):
+        frame = tk.LabelFrame(root, text=f"{theme.capitalize()} Theme")
+        frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        # サービス例
+        services = ['onecomme', 'messagebus', 'voicevox']
+        for j, service in enumerate(services):
+            service_frame = tk.Frame(frame)
+            service_frame.pack(side=tk.LEFT, padx=10, pady=10)
+            
+            tk.Label(service_frame, text=service).pack()
+            
+            switch = SlideSwitch(
+                service_frame,
+                initial_value=j % 2 == 0,  # 交互にON/OFF
+                callback=demo_callback,
+                theme=theme,
+                service_key=service
+            )
+            switch.pack(pady=5)
+            
+            switches[f"{theme}_{service}"] = switch
+    
+    # テスト用ボタン
+    test_frame = tk.Frame(root)
+    test_frame.pack(pady=20)
+    
+    def test_auto_off():
+        for switch in switches.values():
+            if switch.get_state():
+                switch.auto_off(2000)  # 2秒後自動OFF
+    
+    def test_connecting():
+        for switch in switches.values():
+            switch.set_connecting_state(True)
+            switch.after(3000, lambda s=switch: s.stop_connecting_animation())
+    
+    tk.Button(test_frame, text="🚨 自動OFFテスト", command=test_auto_off).pack(side=tk.LEFT, padx=5)
+    tk.Button(test_frame, text="🔄 接続中テスト", command=test_connecting).pack(side=tk.LEFT, padx=5)
+    
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    # デモ実行
+    run_slideswitch_demo()

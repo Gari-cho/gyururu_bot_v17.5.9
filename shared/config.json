@@ -1,0 +1,119 @@
+{
+  "version": "17.2.0",
+  "last_updated": "2025-10-24T11:50:29.237167",
+
+  "websocket": {
+    "onecomme": {
+      "url": "ws://127.0.0.1:11180/sub",
+      "enabled": true,
+      "reconnect_interval": 5.0,
+      "max_reconnect_attempts": 0,
+      "connection_timeout": 10.0,
+      "recent_window_sec": 12.0,
+      "consume_connected_bulk": true,
+      "raw_log_limit": 3
+    }
+  },
+
+  "obs": {
+    "enabled": false,
+    "host": "localhost",
+    "port": 4455,
+    "password": ""
+  },
+  "display.output.mode": "HTML"   // "TEXT" も選べるように
+
+  "display.flow.direction": "UP",
+  "display.box.width_px": 520,
+  "display.box.height_px": 140,
+  "display.wrap.enabled": true,
+  "display.wrap.char_px": 14,
+  "display.wrap.line_px": 28,
+  "display.message_format": "PREFIX",
+  "display.name_visibility": "SHOW",
+  "display.role_badge": true,
+
+  "display.area.mode": "SEPARATE",
+  "display.max_items.ai": 0,
+  "display.max_items.streamer": 0,
+  "display.max_items.timeline": 0,
+  "display.timeline.include_viewer": false,
+
+  "expire.ai.enabled": false,
+  "expire.ai.seconds": 10,
+  "expire.streamer.enabled": false,
+  "expire.streamer.seconds": 10,
+  "expire.viewer.enabled": false,
+  "expire.viewer.seconds": 10,
+
+  "display.flow.pad_bottom": true,
+
+  "voicevox": {
+    "enabled": true,
+    "host": "localhost",
+    "port": 50021
+  },
+
+  "bouyomi": {
+    "enabled": false,
+    "host": "localhost",
+    "port": 50001
+  },
+
+  "ai": {
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-20250514",
+    "api_key": "",
+    "response_probability": 1.0,
+    "max_tokens": 1000,
+    "temperature": 0.7,
+    "system_prompt": "あなたは配信者のアシスタントです。視聴者のコメントに対して、親しみやすく簡潔に応答してください。"
+  },
+
+  "voice": {
+    "enabled": true,
+    "engine": "voicevox",
+    "speaker_id": 3,
+    "speed": 1.0,
+    "pitch": 0.0,
+    "volume": 1.0,
+    "auto_play": true
+  },
+
+  "chat": {
+    "enabled": true,
+    "log_enabled": true,
+    "max_history": 100,
+    "show_timestamps": true,
+    "filter_commands": true
+  },
+
+  "streamer": {
+    "name": "配信者",
+    "description": "",
+    "streaming_style": "雑談",
+    "personality": "フレンドリー"
+  },
+
+  "obs_effects": {
+    "enabled": false,
+    "auto_switch_scenes": false,
+    "effects": {}
+  },
+
+  "gui": {
+    "theme": "default",
+    "window_width": 1200,
+    "window_height": 800,
+    "remember_position": true,
+    "tab_order": [
+      "websocket",
+      "chat",
+      "voice",
+      "streamer",
+      "ai_unified",
+      "obs",
+      "settings"
+    ]
+  }
+}

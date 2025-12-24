@@ -1,0 +1,687 @@
+# connection_panel.py - 契約統一対応版
+"""
+ぎゅるるボット v16 Phase3 - 接続制御パネル（契約統一版）
+
+🔧 Phase3 改善点:
+✅ shared.contracts 統一使用
+✅ ServiceState・正規化関数の重複削除
+✅ 'dict' object has no attribute エラー完全解消
+✅ UIに専念（接続ロジックは委譲）
+
+Author: Claude & ユーザー
+Version: 16.3.0
+License: MIT
+"""
+
+import tkinter as tk
+from tkinter import ttk
+import logging
+from typing import Dict, Any, Optional, Callable
+
+# 🎯 統一契約からインポート（重複定義削除）
+try:
+    from shared.contracts import (
+        ServiceState, 
+        normalize_service, 
+        normalize_services_dict,
+        safe_service_update,
+        get_service_summary,
+        ServiceKeys
+    )
+    from shared.message_bus import MessageBus, Events
+except ImportError:
+    # フォールバック: 相対インポート
+    try:
+        from .shared.contracts import (
+            ServiceState, 
+            normalize_service, 
+            normalize_services_dict,
+            safe_service_update,
+            get_service_summary,
+            ServiceKeys
+        )
+        from .shared.message_bus import MessageBus, Events
+    except ImportError:
+        # 最後の砦: ローカル定義（本番では削除予定）
+        from dataclasses import dataclass, field
+        from typing import Dict, Any, Optional
+        
+        @dataclass
+        class ServiceState:
+            key: str
+            enabled: bool = False
+            connected: bool = False
+            name: Optional[str] = None
+            meta: Dict[str, Any] = field(default_factory=dict)
+            
+            def update_state(self, *, enabled: Optional[bool] = None, 
+                           connected: Optional[bool] = None, **kwargs):
+                if enabled is not None: self.enabled = bool(enabled)
+                if connected is not None: self.connected = bool(connected)
+                if kwargs: self.meta.update(kwargs)
+        
+        def normalize_service(key: str, raw: Any) -> ServiceState:
+            if isinstance(raw, ServiceState): return raw
+            if isinstance(raw, dict):
+                return ServiceState(
+                    key=key,
+                    enabled=bool(raw.get("enabled", False)),
+                    connected=bool(raw.get("connected", False)),
+                    name=str(raw.get("name", key))
+                )
+            return ServiceState(key=key, enabled=False, connected=False, name=key)
+
+try:
+    from .slide_switch import SlideSwitch
+except ImportError:
+    from slide_switch import SlideSwitch
+
+logger = logging.getLogger(__name__)
+
+class ConnectionControlPanel(ttk.Frame):
+    """
+    接続制御パネル（契約統一版）
+    
+    🎯 責務:
+    - サービス状態の表示のみ
+    - スイッチUI提供
+    - イベント通知（実際の接続処理は委譲）
+    """
+    
+    def __init__(self, parent, message_bus: MessageBus, service_registry=None):
+        super().__init__(parent)
+        
+        self.message_bus = message_bus
+        self.service_registry = service_registry
+        
+        # 🏗️ サービス状態管理（統一契約使用）
+        self.services: Dict[str, ServiceState] = {}
+        
+        # UI要素
+        self.service_switches: Dict[str, SlideSwitch] = {}
+        self.status_labels: Dict[str, ttk.Label] = {}
+        self.summary_var = tk.StringVar()
+        
+        # イベントハンドラー
+        self._connection_callbacks: Dict[str, Callable] = {}
+        
+        # UI構築
+        self._setup_ui()
+        self._setup_event_handlers()
+        
+        logger.info("🎛️ ConnectionControlPanel 初期化完了")
+    
+    def _setup_ui(self):
+        """UI構築"""
+        # メインフレーム
+        main_frame = ttk.LabelFrame(self, text="🔌 接続制御", padding=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # サマリー表示
+        summary_frame = ttk.Frame(main_frame)
+        summary_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(summary_frame, text="📊 状態サマリー:").pack(side=tk.LEFT)
+        ttk.Label(summary_frame, textvariable=self.summary_var).pack(side=tk.LEFT, padx=(5, 0))
+        
+        # サービス制御エリア
+        self.services_frame = ttk.Frame(main_frame)
+        self.services_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # 初期サービス作成
+        self._create_default_services()
+    
+    def _create_default_services(self):
+        """デフォルトサービスの作成"""
+        default_services = {
+            ServiceKeys.WEBSOCKET: {
+                "name": "WebSocket",
+                "enabled": False,
+                "connected": False
+            },
+            ServiceKeys.MQTT: {
+                "name": "MQTT",
+                "enabled": False,
+                "connected": False
+            }
+        }
+        
+        self.update_services(default_services)
+    
+    def _setup_event_handlers(self):
+        """イベントハンドラー設定"""
+        if self.message_bus:
+            # 🎯 統一契約対応イベント購読
+            self.message_bus.subscribe(
+                Events.CONNECTION_STATUS_CHANGED, 
+                self._on_connection_status_changed,
+                "ConnectionControlPanel"
+            )
+            self.message_bus.subscribe(
+                Events.SERVICE_ERROR,
+                self._on_service_error,
+                "ConnectionControlPanel"
+            )
+    
+    def update_services(self, services: Dict[str, Any]):
+        """
+        🔧 サービス状態更新（統一契約版）
+        
+        Args:
+            services: 生サービス辞書（dict/オブジェクト混在OK）
+        """
+        try:
+            # 🎯 統一正規化処理
+            normalized_services = normalize_services_dict(services)
+            
+            # 既存サービスと統合
+            for key, service_state in normalized_services.items():
+                if key in self.services:
+                    # 既存サービスの更新
+                    existing = self.services[key]
+                    existing.enabled = service_state.enabled
+                    existing.connected = service_state.connected
+                    existing.meta.update(service_state.meta)
+                else:
+                    # 新規サービス追加
+                    self.services[key] = service_state
+                    self._create_service_ui(key, service_state)
+            
+            # UI更新
+            self._update_ui()
+            
+            logger.debug(f"🔄 サービス状態更新完了: {len(normalized_services)}件")
+            
+        except Exception as e:
+            logger.error(f"❌ サービス状態更新エラー: {e}")
+    
+    def _create_service_ui(self, service_key: str, service: ServiceState):
+        """個別サービスUI作成"""
+        try:
+            # サービス行フレーム
+            service_frame = ttk.Frame(self.services_frame)
+            service_frame.pack(fill=tk.X, pady=2)
+            
+            # サービス名
+            name_label = ttk.Label(
+                service_frame, 
+                text=f"{service.name or service_key}:",
+                width=15
+            )
+            name_label.pack(side=tk.LEFT, padx=(0, 10))
+            
+            # スライドスイッチ
+            switch = SlideSwitch(
+                service_frame,
+                initial_state=service.enabled,
+                callback=lambda state, key=service_key: self._on_switch_changed(key, state)
+            )
+            switch.pack(side=tk.LEFT, padx=(0, 10))
+            self.service_switches[service_key] = switch
+            
+            # 状態ラベル
+            status_label = ttk.Label(service_frame, text="")
+            status_label.pack(side=tk.LEFT, padx=(0, 10))
+            self.status_labels[service_key] = status_label
+            
+            logger.debug(f"🎨 サービスUI作成: {service_key}")
+            
+        except Exception as e:
+            logger.error(f"❌ サービスUI作成エラー ({service_key}): {e}")
+    
+    def _update_ui(self):
+        """UI状態更新"""
+        try:
+            # 各サービスUI更新
+            for key, service in self.services.items():
+                # スイッチ状態更新
+                if key in self.service_switches:
+                    switch = self.service_switches[key]
+                    switch.set_state(service.enabled)
+                
+                # 状態ラベル更新
+                if key in self.status_labels:
+                    label = self.status_labels[key]
+                    status_text, color = self._get_status_display(service)
+                    label.config(text=status_text, foreground=color)
+            
+            # サマリー更新
+            self._update_summary()
+            
+        except Exception as e:
+            logger.error(f"❌ UI更新エラー: {e}")
+    
+    def _get_status_display(self, service: ServiceState) -> tuple[str, str]:
+        """状態表示テキストと色を取得"""
+        if service.connected:
+            return "🟢 接続中", "green"
+        elif service.enabled:
+            return "🟡 接続待機", "orange"
+        else:
+            return "🔴 無効", "red"
+    
+    def _update_summary(self):
+        """サマリー表示更新"""
+        try:
+            # 🎯 統一契約のサマリー関数使用
+            summary = get_service_summary(self.services)
+            
+            summary_text = (
+                f"全体: {summary['total_services']}件 | "
+                f"有効: {summary['enabled_services']}件 | "
+                f"接続中: {summary['connected_services']}件 | "
+                f"健康度: {summary['health_percentage']:.0f}%"
+            )
+            
+            self.summary_var.set(summary_text)
+            
+        except Exception as e:
+            logger.error(f"❌ サマリー更新エラー: {e}")
+            self.summary_var.set("❌ サマリー取得エラー")
+    
+    def _on_switch_changed(self, service_key: str, enabled: bool):
+        """スイッチ変更ハンドラー"""
+        try:
+            logger.info(f"🔄 スイッチ変更: {service_key} -> {'有効' if enabled else '無効'}")
+            
+            # サービス状態更新
+            if service_key in self.services:
+                self.services[service_key].enabled = enabled
+                # 無効化時は接続も切断
+                if not enabled:
+                    self.services[service_key].connected = False
+            
+            # イベント通知（実際の接続処理は他で実行）
+            if self.message_bus:
+                self.message_bus.publish(
+                    Events.CONNECTION_STATUS_CHANGED,
+                    {
+                        'service': service_key,
+                        'enabled': enabled,
+                        'action': 'enable' if enabled else 'disable'
+                    },
+                    sender="ConnectionControlPanel"
+                )
+            
+            # コールバック実行
+            if service_key in self._connection_callbacks:
+                try:
+                    self._connection_callbacks[service_key](service_key, enabled)
+                except Exception as e:
+                    logger.error(f"❌ コールバック実行エラー ({service_key}): {e}")
+            
+            # UI更新
+            self._update_ui()
+            
+        except Exception as e:
+            logger.error(f"❌ スイッチ変更処理エラー ({service_key}): {e}")
+    
+    def _on_connection_status_changed(self, data: Dict[str, Any], sender: str):
+        """接続状態変更イベントハンドラー"""
+        try:
+            service_key = data.get('service')
+            if not service_key or service_key not in self.services:
+                return
+            
+            # 🎯 統一契約による安全な更新
+            service = self.services[service_key]
+            safe_service_update(service, data)
+            
+            # UI更新
+            self.after_idle(self._update_ui)
+            
+            logger.debug(f"📡 接続状態変更受信: {service_key} from {sender}")
+            
+        except Exception as e:
+            logger.error(f"❌ 接続状態変更処理エラー: {e}")
+    
+    def _on_service_error(self, data: Dict[str, Any], sender: str):
+        """サービスエラーイベントハンドラー"""
+        try:
+            service_key = data.get('service')
+            error_message = data.get('error', 'Unknown error')
+            
+            logger.warning(f"⚠️ サービスエラー受信: {service_key} - {error_message}")
+            
+            # エラー時はスイッチを無効化
+            if service_key in self.services:
+                self.services[service_key].enabled = False
+                self.services[service_key].connected = False
+                self.services[service_key].meta['last_error'] = error_message
+                self.after_idle(self._update_ui)
+            
+        except Exception as e:
+            logger.error(f"❌ サービスエラー処理エラー: {e}")
+    
+    def set_connection_callback(self, service_key: str, callback: Callable[[str, bool], None]):
+        """
+        接続コールバック設定
+        
+        Args:
+            service_key: サービスキー
+            callback: コールバック関数 (service_key, enabled) を受け取る
+        """
+        self._connection_callbacks[service_key] = callback
+        logger.debug(f"🔗 コールバック設定: {service_key}")
+    
+    def get_service_state(self, service_key: str) -> Optional[ServiceState]:
+        """
+        サービス状態取得
+        
+        Args:
+            service_key: サービスキー
+            
+        Returns:
+            ServiceState: サービス状態（存在しない場合はNone）
+        """
+        return self.services.get(service_key)
+    
+    def get_all_services(self) -> Dict[str, ServiceState]:
+        """全サービス状態取得"""
+        return self.services.copy()
+    
+    def set_service_enabled(self, service_key: str, enabled: bool):
+        """
+        プログラムからのサービス有効/無効設定
+        
+        Args:
+            service_key: サービスキー
+            enabled: 有効フラグ
+        """
+        try:
+            if service_key in self.services:
+                self.services[service_key].enabled = enabled
+                
+                # スイッチUI更新
+                if service_key in self.service_switches:
+                    self.service_switches[service_key].set_state(enabled)
+                
+                self._update_ui()
+                logger.info(f"📝 プログラム設定: {service_key} -> {'有効' if enabled else '無効'}")
+            else:
+                logger.warning(f"⚠️ 存在しないサービス: {service_key}")
+                
+        except Exception as e:
+            logger.error(f"❌ サービス設定エラー ({service_key}): {e}")
+    
+    def set_service_connected(self, service_key: str, connected: bool):
+        """
+        プログラムからの接続状態設定
+        
+        Args:
+            service_key: サービスキー
+            connected: 接続フラグ
+        """
+        try:
+            if service_key in self.services:
+                self.services[service_key].connected = connected
+                self._update_ui()
+                logger.debug(f"🔌 接続状態設定: {service_key} -> {'接続' if connected else '切断'}")
+            else:
+                logger.warning(f"⚠️ 存在しないサービス: {service_key}")
+                
+        except Exception as e:
+            logger.error(f"❌ 接続状態設定エラー ({service_key}): {e}")
+    
+    def add_service(self, service_key: str, service_data: Dict[str, Any]):
+        """
+        動的サービス追加
+        
+        Args:
+            service_key: サービスキー
+            service_data: サービスデータ
+        """
+        try:
+            # 🎯 統一正規化
+            service_state = normalize_service(service_key, service_data)
+            self.services[service_key] = service_state
+            
+            # UI作成
+            self._create_service_ui(service_key, service_state)
+            self._update_ui()
+            
+            logger.info(f"➕ サービス追加: {service_key}")
+            
+        except Exception as e:
+            logger.error(f"❌ サービス追加エラー ({service_key}): {e}")
+    
+    def remove_service(self, service_key: str):
+        """
+        サービス削除
+        
+        Args:
+            service_key: サービスキー
+        """
+        try:
+            if service_key in self.services:
+                # データ削除
+                del self.services[service_key]
+                
+                # UI削除
+                if service_key in self.service_switches:
+                    self.service_switches[service_key].destroy()
+                    del self.service_switches[service_key]
+                
+                if service_key in self.status_labels:
+                    self.status_labels[service_key].destroy()
+                    del self.status_labels[service_key]
+                
+                # コールバック削除
+                if service_key in self._connection_callbacks:
+                    del self._connection_callbacks[service_key]
+                
+                self._update_ui()
+                logger.info(f"➖ サービス削除: {service_key}")
+            else:
+                logger.warning(f"⚠️ 削除対象サービスが存在しません: {service_key}")
+                
+        except Exception as e:
+            logger.error(f"❌ サービス削除エラー ({service_key}): {e}")
+    
+    def refresh_from_registry(self):
+        """
+        サービスレジストリから状態を再読み込み
+        """
+        try:
+            if not self.service_registry:
+                logger.warning("⚠️ サービスレジストリが設定されていません")
+                return
+            
+            # レジストリからサービス一覧取得
+            registered_services = self.service_registry.get_all_services()
+            
+            # 各サービスの状態を更新
+            for service_key, service_obj in registered_services.items():
+                service_data = {
+                    'enabled': getattr(service_obj, 'enabled', False),
+                    'connected': getattr(service_obj, 'connected', False),
+                    'name': getattr(service_obj, 'name', service_key)
+                }
+                
+                if service_key in self.services:
+                    # 既存サービス更新
+                    service_state = self.services[service_key]
+                    safe_service_update(service_state, service_data)
+                else:
+                    # 新規サービス追加
+                    self.add_service(service_key, service_data)
+            
+            self._update_ui()
+            logger.info("🔄 サービスレジストリから状態更新完了")
+            
+        except Exception as e:
+            logger.error(f"❌ レジストリ更新エラー: {e}")
+    
+    def get_health_status(self) -> Dict[str, Any]:
+        """
+        パネル全体の健康状態取得
+        
+        Returns:
+            Dict[str, Any]: 健康状態情報
+        """
+        try:
+            # 🎯 統一契約のサマリー関数使用
+            summary = get_service_summary(self.services)
+            
+            # 追加の健康情報
+            health_info = {
+                **summary,
+                'panel_status': 'healthy',
+                'ui_elements': {
+                    'switches': len(self.service_switches),
+                    'labels': len(self.status_labels),
+                    'callbacks': len(self._connection_callbacks)
+                },
+                'timestamp': time.time()
+            }
+            
+            return health_info
+            
+        except Exception as e:
+            logger.error(f"❌ 健康状態取得エラー: {e}")
+            return {
+                'panel_status': 'error',
+                'error': str(e),
+                'timestamp': time.time()
+            }
+    
+    def reset_all_services(self):
+        """全サービスリセット"""
+        try:
+            for service_key in list(self.services.keys()):
+                self.services[service_key].enabled = False
+                self.services[service_key].connected = False
+                self.services[service_key].meta.clear()
+            
+            self._update_ui()
+            logger.info("🔄 全サービスリセット完了")
+            
+        except Exception as e:
+            logger.error(f"❌ サービスリセットエラー: {e}")
+    
+    def export_config(self) -> Dict[str, Any]:
+        """設定エクスポート"""
+        try:
+            config = {}
+            for key, service in self.services.items():
+                config[key] = service.to_dict()
+            
+            return {
+                'services': config,
+                'timestamp': time.time(),
+                'version': '16.3.0'
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ 設定エクスポートエラー: {e}")
+            return {}
+    
+    def import_config(self, config: Dict[str, Any]):
+        """設定インポート"""
+        try:
+            if 'services' not in config:
+                logger.warning("⚠️ 不正な設定フォーマット")
+                return
+            
+            services_config = config['services']
+            self.update_services(services_config)
+            
+            logger.info(f"📥 設定インポート完了: {len(services_config)}件")
+            
+        except Exception as e:
+            logger.error(f"❌ 設定インポートエラー: {e}")
+    
+    def destroy(self):
+        """リソース解放"""
+        try:
+            # イベント購読解除
+            if self.message_bus:
+                self.message_bus.unsubscribe(
+                    Events.CONNECTION_STATUS_CHANGED,
+                    self._on_connection_status_changed,
+                    "ConnectionControlPanel"
+                )
+                self.message_bus.unsubscribe(
+                    Events.SERVICE_ERROR,
+                    self._on_service_error,
+                    "ConnectionControlPanel"
+                )
+            
+            # UI要素クリーンアップ
+            self.service_switches.clear()
+            self.status_labels.clear()
+            self._connection_callbacks.clear()
+            
+            # 親クラスの destroy
+            super().destroy()
+            
+            logger.info("🗑️ ConnectionControlPanel リソース解放完了")
+            
+        except Exception as e:
+            logger.error(f"❌ リソース解放エラー: {e}")
+
+
+# 🚀 便利な作成関数
+def create_connection_panel(parent, message_bus: MessageBus, 
+                          service_registry=None, **kwargs) -> ConnectionControlPanel:
+    """
+    ConnectionControlPanel作成便利関数
+    
+    Args:
+        parent: 親ウィジェット
+        message_bus: メッセージバス
+        service_registry: サービスレジストリ
+        **kwargs: 追加引数
+        
+    Returns:
+        ConnectionControlPanel: 作成されたパネル
+    """
+    return ConnectionControlPanel(parent, message_bus, service_registry, **kwargs)
+
+
+if __name__ == "__main__":
+    # 🧪 テスト実行
+    import time
+    from shared.message_bus import start_message_bus
+    
+    def test_callback(service_key: str, enabled: bool):
+        print(f"🔗 テストコールバック: {service_key} -> {'有効' if enabled else '無効'}")
+    
+    # テスト用ウィンドウ
+    root = tk.Tk()
+    root.title("ConnectionControlPanel テスト")
+    root.geometry("600x400")
+    
+    # メッセージバス開始
+    bus = start_message_bus(debug_mode=True)
+    
+    # パネル作成
+    panel = ConnectionControlPanel(root, bus)
+    panel.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    
+    # テストサービス追加
+    test_services = {
+        'websocket': {'name': 'WebSocket', 'enabled': True, 'connected': False},
+        'mqtt': {'name': 'MQTT', 'enabled': False, 'connected': False},
+        'voice': {'name': '音声', 'enabled': True, 'connected': True}
+    }
+    
+    panel.update_services(test_services)
+    
+    # コールバック設定
+    for key in test_services.keys():
+        panel.set_connection_callback(key, test_callback)
+    
+    # 健康状態表示
+    def show_health():
+        health = panel.get_health_status()
+        print(f"🏥 健康状態: {health}")
+        root.after(5000, show_health)  # 5秒ごとに表示
+    
+    root.after(1000, show_health)
+    
+    try:
+        root.mainloop()
+    finally:
+        bus.stop()
+        print("✅ ConnectionControlPanel テスト完了")

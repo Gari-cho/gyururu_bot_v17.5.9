@@ -1,0 +1,26 @@
+{
+  "max_queue_size": 100,
+  "synthesis_timeout": 30,
+  "playback_timeout": 60,
+  "retry_attempts": 3,
+  "retry_delay": 1.0,
+  "retry_exponential_backoff": true,
+  "health_check_interval": 30,
+  "auto_cleanup_interval": 300,
+  "enable_performance_logging": true,
+  "log_structured_format": true,
+  "config_hot_reload": true,
+  "config_watchdog_enabled": true,
+  "log_rotation_enabled": true,
+  "log_max_days": 7,
+  "error_notification_interval": 5,
+  "health_score_thresholds": {
+    "excellent": 90,
+    "good": 70,
+    "fair": 50,
+    "poor": 30,
+    "critical": 10
+  },
+  "bouyomi_retry_interval": 300,
+  "statistics_retention_size": 500
+}

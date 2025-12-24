@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "response_probability": 0.8,
+  "trigger_keywords": [
+    "ぎゅるる",
+    "gyururu",
+    "AI"
+  ],
+  "providers": {
+    "gemini": {
+      "enabled": true,
+      "model": "gemini-pro",
+      "api_key": "AIzaSyBw-Sq4ofHX63jVm3fLN-n0DF2hMbPhy5I"
+    }
+  }
+}

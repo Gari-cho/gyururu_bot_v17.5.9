@@ -1,0 +1,54 @@
+import tkinter as tk
+
+def create_slide_switch(frame, service_key, toggle_var, on_toggle_callback):
+    switch_frame = tk.Frame(frame, bg="#444444", width=50, height=25)
+    switch_frame.pack_propagate(False)
+
+    canvas = tk.Canvas(switch_frame, width=50, height=25, highlightthickness=0, bg="#444444")
+    canvas.pack(fill=tk.BOTH, expand=True)
+
+    # ノブの描画
+    knob = canvas.create_oval(2, 2, 23, 23, fill="#ffffff", outline="#cccccc")
+    switch_frame.knob = knob
+    switch_frame.canvas = canvas
+    switch_frame.service_key = service_key
+    switch_frame.toggle_var = toggle_var
+    switch_frame.callback = on_toggle_callback
+
+    def on_click(event=None):
+        toggle_var.set(not toggle_var.get())
+        if on_toggle_callback:
+            on_toggle_callback(service_key, toggle_var.get())
+
+    canvas.bind("<Button-1>", on_click)
+    canvas.bind("<Enter>", lambda e: canvas.config(cursor="hand2"))
+
+    return switch_frame
+
+def update_slide_switch_appearance(switch_frame, is_on):
+    canvas = switch_frame.canvas
+    if is_on:
+        canvas.config(bg="#66bb6a")  # 緑
+        canvas.coords(switch_frame.knob, 25, 2, 47, 23)
+    else:
+        canvas.config(bg="#e57373")  # 赤
+        canvas.coords(switch_frame.knob, 2, 2, 23, 23)
+
+def animate_slide_switch(switch_frame, to_on=True, step=0):
+    canvas = switch_frame.canvas
+    knob = switch_frame.knob
+    if to_on:
+        x1 = min(2 + step, 25)
+        x2 = x1 + 21
+        if x1 >= 25:
+            update_slide_switch_appearance(switch_frame, True)
+            return
+    else:
+        x1 = max(25 - step, 2)
+        x2 = x1 + 21
+        if x1 <= 2:
+            update_slide_switch_appearance(switch_frame, False)
+            return
+
+    canvas.coords(knob, x1, 2, x2, 23)
+    switch_frame.after(10, lambda: animate_slide_switch(switch_frame, to_on, step + 2))

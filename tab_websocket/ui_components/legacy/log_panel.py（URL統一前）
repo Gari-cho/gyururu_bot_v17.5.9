@@ -1,0 +1,241 @@
+# -*- coding: utf-8 -*-
+"""
+LogPanel 最小実装版（依存なし・安全版）
+WebSocketタブの構文エラー解決用
+
+特徴:
+- 外部依存なし
+- シンプルなログ表示機能
+- 互換API保持
+- UI分離コンポーネント対応
+"""
+
+import tkinter as tk
+from tkinter import ttk, scrolledtext
+import logging
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+class LogPanel:
+    """最低限のログパネル（依存なし・安全版）"""
+    
+    def __init__(self, parent=None, message_bus=None, *, title="📋 リアルタイムログ"):
+        self.parent = parent
+        self.message_bus = message_bus
+        
+        # フレーム作成
+        self.frame = ttk.Frame(parent) if parent else ttk.Frame()
+        
+        # タイトル
+        self.title_label = ttk.Label(
+            self.frame, 
+            text=title, 
+            font=("Yu Gothic UI", 14, "bold")
+        )
+        self.title_label.pack(anchor="w", pady=(0, 8))
+
+        # ログテキストエリア
+        self.text = scrolledtext.ScrolledText(
+            self.frame, 
+            wrap=tk.WORD, 
+            height=12,
+            bg="#1a1a1a",
+            fg="#ffffff",
+            font=("Consolas", 9)
+        )
+        self.text.pack(fill=tk.BOTH, expand=True)
+        
+        # 初期ログ
+        self.append_log("✅ LogPanel 初期化完了")
+
+        # 操作ボタン
+        btns = ttk.Frame(self.frame)
+        btns.pack(fill=tk.X, pady=(8, 0))
+        
+        ttk.Button(
+            btns, 
+            text="🗑 クリア", 
+            command=self.clear_logs
+        ).pack(side=tk.LEFT)
+        
+        ttk.Button(
+            btns, 
+            text="📄 コピー", 
+            command=self.copy_all
+        ).pack(side=tk.LEFT, padx=(8, 0))
+        
+        ttk.Button(
+            btns, 
+            text="💾 保存", 
+            command=self.save_logs
+        ).pack(side=tk.LEFT, padx=(8, 0))
+
+        logger.info("✅ LogPanel最小実装版 初期化完了")
+
+    # ==================== 互換API ====================
+    
+    def create_in_parent(self, parent):
+        """UI分離版互換API"""
+        self.frame = ttk.Frame(parent)
+        self.__init__(parent)  # 再初期化（親差し替え）
+        return self.frame
+
+    def get_widget(self):
+        """UI分離版互換API"""
+        return self.frame
+
+    # ==================== ログ操作 ====================
+    
+    def append_log(self, msg: str):
+        """ログメッセージ追加"""
+        try:
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            formatted_msg = f"[{timestamp}] {msg}\n"
+            
+            self.text.insert(tk.END, formatted_msg)
+            self.text.see(tk.END)
+            
+            # コンソールにも出力
+            logger.debug(f"LogPanel: {msg}")
+            
+        except Exception as e:
+            logger.error(f"append_log error: {e}")
+
+    def clear_logs(self):
+        """ログクリア"""
+        try:
+            self.text.delete("1.0", tk.END)
+            self.append_log("🗑 ログをクリアしました")
+        except Exception as e:
+            logger.error(f"clear_logs error: {e}")
+
+    def copy_all(self):
+        """全ログをクリップボードにコピー"""
+        try:
+            content = self.text.get("1.0", tk.END).strip()
+            self.frame.clipboard_clear()
+            self.frame.clipboard_append(content)
+            self.append_log("📄 ログをクリップボードにコピーしました")
+        except Exception as e:
+            logger.error(f"copy_all error: {e}")
+
+    def save_logs(self):
+        """ログをファイルに保存"""
+        try:
+            from tkinter import filedialog
+            
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".txt",
+                filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+                title="ログファイルを保存"
+            )
+            
+            if file_path:
+                content = self.text.get("1.0", tk.END)
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                self.append_log(f"💾 ログを保存しました: {file_path}")
+                
+        except Exception as e:
+            logger.error(f"save_logs error: {e}")
+            self.append_log(f"❌ ログ保存エラー: {e}")
+
+    # ==================== MessageBus連携 ====================
+    
+    def setup_message_subscriptions(self):
+        """MessageBus購読設定（オプション）"""
+        if not self.message_bus:
+            return
+            
+        try:
+            # 基本的なイベントを購読してログ表示
+            events_to_subscribe = [
+                "STATUS_UPDATE",
+                "CHAT_MESSAGE", 
+                "VOICE_REQUEST",
+                "AI_RESPONSE",
+                "USER_JOIN"
+            ]
+            
+            for event in events_to_subscribe:
+                try:
+                    self.message_bus.subscribe(event, self._on_message_received)
+                except Exception as e:
+                    logger.debug(f"購読設定スキップ {event}: {e}")
+                    
+            self.append_log("📡 MessageBus購読設定完了")
+            
+        except Exception as e:
+            logger.error(f"MessageBus購読設定エラー: {e}")
+
+    def _on_message_received(self, data, sender=None):
+        """MessageBus受信ログ"""
+        try:
+            event_info = f"📨 {sender}: {str(data)[:50]}"
+            if len(str(data)) > 50:
+                event_info += "..."
+            self.append_log(event_info)
+        except Exception as e:
+            logger.error(f"メッセージ受信ログエラー: {e}")
+
+    # ==================== クリーンアップ ====================
+    
+    def cleanup(self):
+        """クリーンアップ処理"""
+        try:
+            if self.message_bus:
+                # 購読解除（エラーは無視）
+                try:
+                    self.message_bus.unsubscribe("STATUS_UPDATE", self._on_message_received)
+                    self.message_bus.unsubscribe("CHAT_MESSAGE", self._on_message_received)
+                    self.message_bus.unsubscribe("VOICE_REQUEST", self._on_message_received)
+                    self.message_bus.unsubscribe("AI_RESPONSE", self._on_message_received)
+                    self.message_bus.unsubscribe("USER_JOIN", self._on_message_received)
+                except:
+                    pass
+                    
+            logger.info("✅ LogPanel クリーンアップ完了")
+            
+        except Exception as e:
+            logger.error(f"LogPanel クリーンアップエラー: {e}")
+
+
+# ==================== ファクトリ関数 ====================
+
+def create_log_panel(parent, message_bus=None, title="📋 リアルタイムログ"):
+    """LogPanel作成ファクトリ関数"""
+    try:
+        panel = LogPanel(parent, message_bus, title=title)
+        if message_bus:
+            panel.setup_message_subscriptions()
+        return panel
+    except Exception as e:
+        logger.error(f"LogPanel作成エラー: {e}")
+        # フォールバック: 最小限のログパネル
+        frame = ttk.Frame(parent)
+        ttk.Label(frame, text="ログパネル作成エラー").pack(pady=20)
+        return frame
+
+
+# ==================== テスト関数 ====================
+
+def test_log_panel():
+    """LogPanelテスト"""
+    root = tk.Tk()
+    root.title("LogPanel テスト")
+    root.geometry("600x400")
+    
+    panel = LogPanel(root, title="🧪 テスト用ログパネル")
+    panel.frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    
+    # テストログ追加
+    panel.append_log("テストログ1: 初期化完了")
+    panel.append_log("テストログ2: 接続開始")
+    panel.append_log("テストログ3: データ受信")
+    
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    test_log_panel()

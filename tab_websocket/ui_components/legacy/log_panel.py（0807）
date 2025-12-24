@@ -1,0 +1,842 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+📋 WebSocketタブ ログパネル v17.0.0 Phase5 - 修正版
+リアルタイムログ表示・管理
+
+修正内容:
+- ScrolledTextの不正なオプション削除
+- ログタグ設定の修正
+- エラーハンドリング強化
+"""
+
+import tkinter as tk
+from tkinter import ttk, scrolledtext, filedialog, messagebox
+from datetime import datetime
+import logging
+import threading
+from typing import Dict, Any, List, Optional
+
+logger = logging.getLogger(__name__)
+
+
+class LogPanel:
+    """
+    ログパネル専用クラス - 修正版
+    
+    リアルタイムログ表示・検索・管理を担当
+    """
+    
+    def __init__(self, settings, callbacks=None):
+        """
+        初期化
+        
+        Args:
+            settings: 設定辞書
+            callbacks: コールバック辞書（オプション）
+        """
+        self.settings = settings
+        self.callbacks = callbacks or {}
+        
+        # UI要素管理
+        self.parent_frame = None
+        self.main_panel = None
+        self.log_text = None
+        self.search_frame = None
+        self.control_frame = None
+        
+        # ログ管理
+        self.log_buffer = []
+        self.max_log_lines = self.settings.get('max_log_lines', 1000)
+        self.auto_scroll = True
+        self.log_filters = set()
+        
+        # 検索機能
+        self.search_var = None
+        self.search_entry = None
+        self.filter_vars = {}
+        
+        # ログタグ設定（修正版 - descriptionは別管理）
+        self.log_tags = {
+            'success': {'foreground': '#4CAF50'},
+            'error': {'foreground': '#F44336'},
+            'warning': {'foreground': '#FF9800'},
+            'info': {'foreground': '#2196F3'},
+            'debug': {'foreground': '#9E9E9E'},
+            'phase4': {'foreground': '#9C27B0'},
+            'phase5': {'foreground': '#673AB7'},
+            'events_external': {'foreground': '#00BCD4'},
+            'mock_separated': {'foreground': '#8BC34A'},
+            'ui_component': {'foreground': '#FF5722'},
+            'service_control': {'foreground': '#795548'}
+        }
+        
+        # タグ説明（別管理）
+        self.tag_descriptions = {
+            'success': '成功',
+            'error': 'エラー',
+            'warning': '警告',
+            'info': '情報',
+            'debug': 'デバッグ',
+            'phase4': 'Phase4',
+            'phase5': 'Phase5',
+            'events_external': 'Events外部化',
+            'mock_separated': 'Mock分離',
+            'ui_component': 'UI分離',
+            'service_control': 'サービス制御'
+        }
+        
+        logger.info("📋 LogPanel初期化完了")
+    
+    def create_in_parent(self, parent):
+        """親フレーム内にパネル作成"""
+        try:
+            self.parent_frame = parent
+            
+            # メインパネル作成
+            self._create_main_panel()
+            
+            # 制御エリア作成
+            self._create_control_area()
+            
+            # 検索エリア作成
+            self._create_search_area()
+            
+            # ログエリア作成（修正版）
+            self._create_log_area_fixed()
+            
+            # 初期ログ追加
+            self._add_initial_logs()
+            
+            logger.info("✅ ログパネル作成完了")
+            
+        except Exception as e:
+            logger.error(f"❌ ログパネル作成エラー: {e}")
+            raise
+    
+    def _create_main_panel(self):
+        """メインパネル作成"""
+        try:
+            self.main_panel = ttk.LabelFrame(
+                self.parent_frame,
+                text="📋 リアルタイムログ (Phase5 - UI分離版)"
+            )
+            self.main_panel.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+            
+        except Exception as e:
+            logger.error(f"❌ メインパネル作成エラー: {e}")
+            raise
+    
+    def _create_control_area(self):
+        """制御エリア作成"""
+        try:
+            self.control_frame = ttk.Frame(self.main_panel)
+            self.control_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+            
+            # 左側：制御ボタン
+            left_frame = ttk.Frame(self.control_frame)
+            left_frame.pack(side=tk.LEFT)
+            
+            # クリアボタン
+            clear_btn = ttk.Button(
+                left_frame,
+                text="🗑️ クリア",
+                command=self.clear_logs
+            )
+            clear_btn.pack(side=tk.LEFT, padx=(0, 5))
+            
+            # エクスポートボタン
+            export_btn = ttk.Button(
+                left_frame,
+                text="📤 エクスポート",
+                command=self.export_logs
+            )
+            export_btn.pack(side=tk.LEFT, padx=(0, 5))
+            
+            # 自動スクロールチェック
+            self.auto_scroll_var = tk.BooleanVar(value=True)
+            auto_scroll_check = ttk.Checkbutton(
+                left_frame,
+                text="自動スクロール",
+                variable=self.auto_scroll_var,
+                command=self._on_auto_scroll_changed
+            )
+            auto_scroll_check.pack(side=tk.LEFT, padx=(10, 0))
+            
+            # 右側：ログ統計
+            right_frame = ttk.Frame(self.control_frame)
+            right_frame.pack(side=tk.RIGHT)
+            
+            self.stats_label = ttk.Label(
+                right_frame,
+                text="ログ: 0行",
+                font=("Yu Gothic UI", 9)
+            )
+            self.stats_label.pack(side=tk.RIGHT)
+            
+        except Exception as e:
+            logger.error(f"❌ 制御エリア作成エラー: {e}")
+    
+    def _create_search_area(self):
+        """検索エリア作成"""
+        try:
+            self.search_frame = ttk.Frame(self.main_panel)
+            self.search_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
+            
+            # 検索ボックス
+            search_label = ttk.Label(self.search_frame, text="🔍 検索:")
+            search_label.pack(side=tk.LEFT, padx=(0, 5))
+            
+            self.search_var = tk.StringVar()
+            self.search_entry = ttk.Entry(
+                self.search_frame,
+                textvariable=self.search_var,
+                width=30
+            )
+            self.search_entry.pack(side=tk.LEFT, padx=(0, 10))
+            self.search_entry.bind('<KeyRelease>', self._on_search_changed)
+            
+            # フィルターチェックボックス
+            filter_frame = ttk.Frame(self.search_frame)
+            filter_frame.pack(side=tk.LEFT, padx=(10, 0))
+            
+            ttk.Label(filter_frame, text="フィルター:").pack(side=tk.LEFT, padx=(0, 5))
+            
+            # 主要ログレベルのフィルター
+            main_filters = ['error', 'warning', 'success', 'info']
+            for filter_name in main_filters:
+                var = tk.BooleanVar(value=True)
+                check = ttk.Checkbutton(
+                    filter_frame,
+                    text=self.tag_descriptions[filter_name],  # 修正: 別管理の説明を使用
+                    variable=var,
+                    command=lambda f=filter_name: self._on_filter_changed(f)
+                )
+                check.pack(side=tk.LEFT, padx=(0, 5))
+                self.filter_vars[filter_name] = var
+            
+        except Exception as e:
+            logger.error(f"❌ 検索エリア作成エラー: {e}")
+    
+    def _create_log_area_fixed(self):
+        """ログエリア作成（修正版）"""
+        try:
+            # ログテキストエリア（修正版 - 不正なオプション削除）
+            self.log_text = scrolledtext.ScrolledText(
+                self.main_panel,
+                height=20,
+                font=("Consolas", 9),
+                bg="#1e1e1e",
+                fg="#ffffff",
+                insertbackground="#ffffff",
+                wrap=tk.WORD
+            )
+            self.log_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+            
+            # ログタグ設定（修正版）
+            for tag_name, tag_config in self.log_tags.items():
+                try:
+                    self.log_text.tag_config(tag_name, **tag_config)
+                except Exception as e:
+                    logger.warning(f"⚠️ ログタグ設定警告 ({tag_name}): {e}")
+            
+            # 検索ハイライト用タグ
+            self.log_text.tag_config('search_highlight', background='yellow', foreground='black')
+            
+            logger.debug("✅ ログエリア作成完了（修正版）")
+            
+        except Exception as e:
+            logger.error(f"❌ ログエリア作成エラー（修正版）: {e}")
+            # フォールバック：基本的なTextウィジェット
+            self._create_fallback_log_area()
+    
+    def _create_fallback_log_area(self):
+        """フォールバック：基本ログエリア作成"""
+        try:
+            logger.warning("⚠️ フォールバックログエリア作成")
+            
+            # 基本的なTextウィジェット
+            text_frame = ttk.Frame(self.main_panel)
+            text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+            
+            self.log_text = tk.Text(
+                text_frame,
+                height=20,
+                font=("Consolas", 9),
+                bg="#1e1e1e",
+                fg="#ffffff",
+                wrap=tk.WORD
+            )
+            
+            # スクロールバー
+            scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=self.log_text.yview)
+            self.log_text.configure(yscrollcommand=scrollbar.set)
+            
+            self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            
+            # ログタグ設定
+            for tag_name, tag_config in self.log_tags.items():
+                try:
+                    self.log_text.tag_config(tag_name, **tag_config)
+                except Exception as e:
+                    logger.warning(f"⚠️ フォールバックタグ設定警告 ({tag_name}): {e}")
+            
+            logger.info("✅ フォールバックログエリア作成完了")
+            
+        except Exception as e:
+            logger.error(f"❌ フォールバックログエリア作成エラー: {e}")
+    
+    def _add_initial_logs(self):
+        """初期ログ追加"""
+        try:
+            self.add_message("📋 LogPanel Phase5 初期化完了", "phase5")
+            self.add_message("🎨 UI分離によるモジュラー設計適用", "ui_component")
+            self.add_message("✅ リアルタイムログ表示開始", "success")
+            self.add_message("🔧 ScrolledTextオプションエラー修正完了", "info")
+            
+        except Exception as e:
+            logger.error(f"❌ 初期ログ追加エラー: {e}")
+    
+    # === ログ操作メソッド ===
+    
+    def add_message(self, message, tag="info"):
+        """ログメッセージ追加"""
+        try:
+            # タイムスタンプ付きメッセージ作成
+            timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # ミリ秒まで
+            log_message = f"[{timestamp}] {message}\n"
+            
+            # UIスレッドで実行
+            def add_to_ui():
+                try:
+                    # フィルターチェック
+                    if not self._should_show_message(tag):
+                        return
+                    
+                    # ログバッファに追加
+                    self.log_buffer.append({
+                        'timestamp': timestamp,
+                        'message': message,
+                        'tag': tag,
+                        'full_text': log_message
+                    })
+                    
+                    # バッファサイズ制限
+                    if len(self.log_buffer) > self.max_log_lines:
+                        self.log_buffer.pop(0)
+                    
+                    # UI更新
+                    if self.log_text:
+                        self.log_text.insert(tk.END, log_message, tag)
+                        
+                        # 行数制限
+                        self._limit_log_lines()
+                        
+                        # 自動スクロール
+                        if self.auto_scroll:
+                            self.log_text.see(tk.END)
+                        
+                        # 統計更新
+                        self._update_stats()
+                        
+                        # 検索ハイライト更新
+                        self._update_search_highlight()
+                    
+                except Exception as e:
+                    logger.error(f"❌ ログUI追加エラー: {e}")
+            
+            # メインスレッドで実行
+            if threading.current_thread() == threading.main_thread():
+                add_to_ui()
+            else:
+                if self.parent_frame:
+                    self.parent_frame.after(0, add_to_ui)
+                
+        except Exception as e:
+            logger.error(f"❌ ログメッセージ追加エラー: {e}")
+    
+    def _should_show_message(self, tag):
+        """メッセージ表示判定"""
+        try:
+            # フィルターチェック
+            if tag in self.filter_vars:
+                return self.filter_vars[tag].get()
+            return True  # 未知のタグは表示
+            
+        except Exception as e:
+            logger.error(f"❌ メッセージ表示判定エラー: {e}")
+            return True
+    
+    def _limit_log_lines(self):
+        """ログ行数制限"""
+        try:
+            if not self.log_text:
+                return
+                
+            lines = int(self.log_text.index('end-1c').split('.')[0])
+            if lines > self.max_log_lines:
+                # 先頭行を削除
+                delete_lines = lines - self.max_log_lines + 100  # 少し多めに削除
+                self.log_text.delete('1.0', f'{delete_lines}.0')
+                
+        except Exception as e:
+            logger.error(f"❌ ログ行数制限エラー: {e}")
+    
+    def clear_logs(self):
+        """ログクリア"""
+        try:
+            if self.log_text:
+                self.log_text.delete('1.0', tk.END)
+            self.log_buffer.clear()
+            self._update_stats()
+            self.add_message("🗑️ ログをクリアしました", "info")
+            
+        except Exception as e:
+            logger.error(f"❌ ログクリアエラー: {e}")
+    
+    def export_logs(self):
+        """ログエクスポート"""
+        try:
+            if not self.log_buffer:
+                messagebox.showwarning("警告", "エクスポートするログがありません")
+                return
+            
+            # ファイル選択
+            filename = filedialog.asksaveasfilename(
+                title="ログエクスポート",
+                defaultextension=".txt",
+                filetypes=[
+                    ("テキストファイル", "*.txt"),
+                    ("ログファイル", "*.log"),
+                    ("全ファイル", "*.*")
+                ]
+            )
+            
+            if not filename:
+                return
+            
+            # ログ書き出し
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(f"# WebSocketタブ ログエクスポート\n")
+                f.write(f"# エクスポート日時: {datetime.now().isoformat()}\n")
+                f.write(f"# ログ件数: {len(self.log_buffer)}件\n")
+                f.write("# " + "="*50 + "\n\n")
+                
+                for log_entry in self.log_buffer:
+                    f.write(f"[{log_entry['timestamp']}] [{log_entry['tag']}] {log_entry['message']}\n")
+            
+            messagebox.showinfo("完了", f"ログを {filename} にエクスポートしました")
+            self.add_message(f"📤 ログエクスポート完了: {filename}", "success")
+            
+        except Exception as e:
+            logger.error(f"❌ ログエクスポートエラー: {e}")
+            messagebox.showerror("エラー", f"ログエクスポートに失敗しました:\n{e}")
+    
+    # === 検索・フィルター機能 ===
+    
+    def _on_search_changed(self, event=None):
+        """検索文字列変更イベント"""
+        try:
+            self._update_search_highlight()
+            
+        except Exception as e:
+            logger.error(f"❌ 検索変更エラー: {e}")
+    
+    def _update_search_highlight(self):
+        """検索ハイライト更新"""
+        try:
+            if not self.log_text:
+                return
+                
+            # 既存のハイライトクリア
+            self.log_text.tag_remove('search_highlight', '1.0', tk.END)
+            
+            search_text = self.search_var.get().strip() if self.search_var else ""
+            if not search_text:
+                return
+            
+            # 検索実行
+            start_pos = '1.0'
+            while True:
+                pos = self.log_text.search(search_text, start_pos, tk.END, nocase=True)
+                if not pos:
+                    break
+                
+                end_pos = f"{pos}+{len(search_text)}c"
+                self.log_text.tag_add('search_highlight', pos, end_pos)
+                start_pos = end_pos
+                
+        except Exception as e:
+            logger.error(f"❌ 検索ハイライト更新エラー: {e}")
+    
+    def _on_filter_changed(self, filter_name):
+        """フィルター変更イベント"""
+        try:
+            # ログ再表示
+            self._refresh_log_display()
+            
+        except Exception as e:
+            logger.error(f"❌ フィルター変更エラー: {e}")
+    
+    def _refresh_log_display(self):
+        """ログ表示リフレッシュ"""
+        try:
+            if not self.log_text:
+                return
+                
+            # 現在の表示をクリア
+            self.log_text.delete('1.0', tk.END)
+            
+            # フィルター適用して再表示
+            for log_entry in self.log_buffer:
+                if self._should_show_message(log_entry['tag']):
+                    self.log_text.insert(tk.END, log_entry['full_text'], log_entry['tag'])
+            
+            # 検索ハイライト更新
+            self._update_search_highlight()
+            
+            # 自動スクロール
+            if self.auto_scroll:
+                self.log_text.see(tk.END)
+                
+        except Exception as e:
+            logger.error(f"❌ ログ表示リフレッシュエラー: {e}")
+    
+    def _on_auto_scroll_changed(self):
+        """自動スクロール設定変更"""
+        try:
+            self.auto_scroll = self.auto_scroll_var.get()
+            if self.auto_scroll and self.log_text:
+                self.log_text.see(tk.END)
+                
+        except Exception as e:
+            logger.error(f"❌ 自動スクロール設定変更エラー: {e}")
+    
+    # === 統計・状態管理 ===
+    
+    def _update_stats(self):
+        """統計情報更新"""
+        try:
+            if not self.stats_label:
+                return
+                
+            total_lines = len(self.log_buffer)
+            visible_lines = 0
+            if self.log_text:
+                try:
+                    visible_lines = int(self.log_text.index('end-1c').split('.')[0]) - 1
+                except:
+                    visible_lines = 0
+            
+            # タグ別カウント
+            tag_counts = {}
+            for log_entry in self.log_buffer:
+                tag = log_entry['tag']
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+            
+            # 統計テキスト生成
+            stats_text = f"ログ: {total_lines}行 (表示: {visible_lines}行)"
+            if tag_counts:
+                error_count = tag_counts.get('error', 0)
+                warning_count = tag_counts.get('warning', 0)
+                if error_count > 0 or warning_count > 0:
+                    stats_text += f" | エラー: {error_count}件, 警告: {warning_count}件"
+            
+            self.stats_label.config(text=stats_text)
+            
+        except Exception as e:
+            logger.error(f"❌ 統計情報更新エラー: {e}")
+    
+    # === クリーンアップ ===
+    
+    def cleanup(self):
+        """パネルクリーンアップ"""
+        try:
+            logger.info("🧹 LogPanel クリーンアップ開始")
+            
+            # ログバッファクリア
+            self.log_buffer.clear()
+            
+            # フィルター変数クリア
+            self.filter_vars.clear()
+            
+            logger.info("✅ LogPanel クリーンアップ完了")
+            
+        except Exception as e:
+            logger.error(f"❌ ログパネルクリーンアップエラー: {e}")
+    
+    def get_status(self):
+        """パネル状態取得"""
+        try:
+            return {
+                'panel_created': self.main_panel is not None,
+                'log_count': len(self.log_buffer),
+                'max_log_lines': self.max_log_lines,
+                'auto_scroll': self.auto_scroll,
+                'filter_count': len(self.filter_vars),
+                'search_active': bool(self.search_var and self.search_var.get().strip()),
+                'log_text_available': self.log_text is not None
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ ログパネル状態取得エラー: {e}")
+            return {'error': str(e)}
+
+
+# === ファクトリー関数 ===
+
+def create_log_panel(settings, callbacks=None):
+    """
+    LogPanel作成関数（修正版）
+    
+    Args:
+        settings: 設定辞書
+        callbacks: コールバック辞書（オプション）
+        
+    Returns:
+        LogPanel: ログパネルインスタンス
+    """
+    try:
+        panel = LogPanel(settings, callbacks)
+        logger.info("✅ LogPanel作成完了（修正版）")
+        return panel
+        
+    except Exception as e:
+        logger.error(f"❌ LogPanel作成エラー: {e}")
+        raise
+
+
+# === 高度な機能 ===
+
+def add_bulk_messages(self, messages):
+    """一括ログメッセージ追加"""
+    try:
+        for message_data in messages:
+            if isinstance(message_data, dict):
+                self.add_message(message_data.get('message', ''), message_data.get('tag', 'info'))
+            else:
+                self.add_message(str(message_data), 'info')
+                
+    except Exception as e:
+        logger.error(f"❌ 一括ログメッセージ追加エラー: {e}")
+
+def search_logs(self, query, tag_filter=None):
+    """ログ検索"""
+    try:
+        results = []
+        query_lower = query.lower()
+        
+        for log_entry in self.log_buffer:
+            # タグフィルター適用
+            if tag_filter and log_entry['tag'] != tag_filter:
+                continue
+            
+            # テキスト検索
+            if query_lower in log_entry['message'].lower():
+                results.append(log_entry)
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"❌ ログ検索エラー: {e}")
+        return []
+
+def get_logs_by_timerange(self, start_time, end_time):
+    """時間範囲でログ取得"""
+    try:
+        results = []
+        
+        for log_entry in self.log_buffer:
+            try:
+                log_time = datetime.strptime(log_entry['timestamp'], "%H:%M:%S.%f")
+                if start_time <= log_time <= end_time:
+                    results.append(log_entry)
+            except ValueError:
+                continue
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"❌ 時間範囲ログ取得エラー: {e}")
+        return []
+
+def set_log_level_visibility(self, level_settings):
+    """ログレベル表示設定"""
+    try:
+        for level, visible in level_settings.items():
+            if level in self.filter_vars:
+                self.filter_vars[level].set(visible)
+        
+        self._refresh_log_display()
+        
+    except Exception as e:
+        logger.error(f"❌ ログレベル表示設定エラー: {e}")
+
+# === 設定管理 ===
+
+def update_settings(self, new_settings):
+    """設定更新"""
+    try:
+        self.settings.update(new_settings)
+        
+        # 最大行数更新
+        if 'max_log_lines' in new_settings:
+            self.max_log_lines = new_settings['max_log_lines']
+            self._limit_log_lines()
+        
+        # 自動スクロール更新
+        if 'auto_scroll' in new_settings:
+            self.auto_scroll_var.set(new_settings['auto_scroll'])
+            self._on_auto_scroll_changed()
+            
+    except Exception as e:
+        logger.error(f"❌ 設定更新エラー: {e}")
+
+def get_settings(self):
+    """現在の設定取得"""
+    try:
+        return {
+            'max_log_lines': self.max_log_lines,
+            'auto_scroll': self.auto_scroll,
+            'filter_settings': {name: var.get() for name, var in self.filter_vars.items()}
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ 設定取得エラー: {e}")
+        return {}
+
+def get_log_summary(self):
+    """ログサマリー取得"""
+    try:
+        tag_counts = {}
+        recent_errors = []
+        
+        for log_entry in self.log_buffer:
+            tag = log_entry['tag']
+            tag_counts[tag] = tag_counts.get(tag, 0) + 1
+            
+            # 最近のエラー収集
+            if tag == 'error' and len(recent_errors) < 5:
+                recent_errors.append({
+                    'timestamp': log_entry['timestamp'],
+                    'message': log_entry['message'][:100]  # 最初の100文字
+                })
+        
+        return {
+            'total_logs': len(self.log_buffer),
+            'tag_counts': tag_counts,
+            'recent_errors': recent_errors,
+            'buffer_size': self.max_log_lines,
+            'auto_scroll': self.auto_scroll
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ ログサマリー取得エラー: {e}")
+        return {}
+
+
+# LogPanelクラスに上記メソッドを追加（インデント修正）
+# 実際のコードでは、これらのメソッドはLogPanelクラス内に配置してください
+
+# クラスの外で定義する場合は以下のようにLogPanelに追加
+LogPanel.add_bulk_messages = add_bulk_messages
+LogPanel.search_logs = search_logs  
+LogPanel.get_logs_by_timerange = get_logs_by_timerange
+LogPanel.set_log_level_visibility = set_log_level_visibility
+LogPanel.update_settings = update_settings
+LogPanel.get_settings = get_settings
+LogPanel.get_log_summary = get_log_summary
+
+
+# === テスト関数 ===
+
+def test_log_panel():
+    """LogPanelテスト関数（修正版）"""
+    print("🧪 LogPanel修正版テスト開始")
+    
+    try:
+        # テストウィンドウ作成
+        root = tk.Tk()
+        root.title("LogPanel修正版テスト")
+        root.geometry("1000x600")
+        
+        # テスト用設定
+        test_settings = {
+            'max_log_lines': 500,
+            'auto_scroll': True
+        }
+        
+        # パネル作成
+        panel = create_log_panel(test_settings)
+        panel.create_in_parent(root)
+        
+        # テストログ追加
+        test_logs = [
+            ("📋 LogPanel修正版テスト開始", "phase5"),
+            ("✅ ScrolledTextオプションエラー修正", "success"),
+            ("⚠️ テスト警告メッセージ", "warning"),
+            ("❌ テストエラーメッセージ", "error"),
+            ("ℹ️ 情報メッセージ", "info"),
+            ("🔧 デバッグメッセージ", "debug"),
+            ("🎨 UI分離テスト", "ui_component"),
+            ("🎮 サービス制御テスト", "service_control")
+        ]
+        
+        # 定期的にテストログ追加
+        def add_test_logs():
+            try:
+                import random
+                log_message, log_tag = random.choice(test_logs)
+                panel.add_message(f"{log_message} (#{random.randint(1000, 9999)})", log_tag)
+                root.after(2000, add_test_logs)  # 2秒ごと
+            except:
+                pass
+        
+        # 初期ログ追加
+        for message, tag in test_logs:
+            panel.add_message(message, tag)
+        
+        # 定期追加開始
+        add_test_logs()
+        
+        # 状態確認
+        status = panel.get_status()
+        print(f"📊 パネル状態（修正版）: {status}")
+        
+        # 修正確認ログ
+        print("✅ 修正項目確認:")
+        print("  - ScrolledTextオプションエラー修正")
+        print("  - ログタグ設定分離")
+        print("  - エラーハンドリング強化") 
+        print("  - フォールバック機能追加")
+        
+        # 終了処理
+        def on_closing():
+            try:
+                panel.cleanup()
+                root.destroy()
+            except Exception as e:
+                print(f"❌ 終了処理エラー: {e}")
+                root.destroy()
+        
+        root.protocol("WM_DELETE_WINDOW", on_closing)
+        
+        print("🚀 ログパネル修正版テスト開始 - ウィンドウを閉じて終了")
+        root.mainloop()
+        
+        print("✅ LogPanel修正版テスト完了")
+        return True
+        
+    except Exception as e:
+        print(f"❌ テストエラー: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+if __name__ == "__main__":
+    # テスト実行
+    print("🔧 log_panel.py 修正版")
+    print("📋 ScrolledTextオプションエラー修正完了")
+    test_log_panel()

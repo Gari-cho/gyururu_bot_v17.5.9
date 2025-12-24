@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# tab_websocket/ui_components/__init__.py
+# UIパネルおよびコンポーネントの明示的インポート定義
+
+from .base_ui import WebSocketTabUI as BaseWebSocketTabUI  # メインUI構築用
+from .websocket_tab_ui import WebSocketTabUI as TabManagerUI  # タブ管理ユーティリティ用
+from .log_panel import LogPanel
+from .connection_panel import ConnectionControlPanel
+from .analysis_panel import AnalysisPanel
+
+# SlideSwitch関連ユーティリティ
+try:
+    from .slide_switch import (
+        create_slide_switch,
+        update_slide_switch_appearance,
+        animate_slide_switch
+    )
+    SLIDE_SWITCH_AVAILABLE = True
+except ImportError:
+    SLIDE_SWITCH_AVAILABLE = False
+    # ダミー関数
+    def create_slide_switch(*args, **kwargs):
+        return None
+    def update_slide_switch_appearance(*args, **kwargs):
+        pass
+    def animate_slide_switch(*args, **kwargs):
+        pass
+
+# UIの一覧をリストで管理する場合（例：自動登録など）
+__all__ = [
+    "WebSocketTabUI",
+    "LogPanel",
+    "ConnectionControlPanel",  # ← 正しいクラス名に修正
+    "AnalysisPanel",
+    "create_slide_switch",
+    "update_slide_switch_appearance",
+    "animate_slide_switch"
+]

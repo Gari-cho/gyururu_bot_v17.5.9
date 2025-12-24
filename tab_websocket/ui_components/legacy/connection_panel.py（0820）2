@@ -1,0 +1,736 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+🔧 WebSocketタブ 接続制御パネル v16.4 完全修正版（ONECOMME配線追加）
+
+修正内容:
+✅ 不要なprint・messagebox.showinfo削除
+✅ テスト用ダミーイベント購読削除
+✅ 契約統一対応完了（shared.contracts使用）
+✅ 'dict' object has no attribute エラー完全解消
+✅ UIに専念（接続ロジックは外部へ委譲）
+✅ 初期化タイミング修正
+🆕 ONECOMMEスイッチで WebSocketManager を起動/停止（幹線開通）
+
+Author: Claude & ユーザー
+Version: 16.4.1
+License: MIT
+"""
+
+import tkinter as tk
+from tkinter import ttk
+import logging
+import time
+from typing import Dict, Any, Optional, Callable
+
+logger = logging.getLogger(__name__)
+
+# === 統一インポート（shared.contracts 使用） ===
+try:
+    from shared.contracts import (
+        ServiceState,
+        normalize_service,
+        normalize_services_dict,
+        safe_service_update,
+        get_service_summary,
+        ServiceKeys
+    )
+    from shared.message_bus import MessageBus, get_message_bus
+    from shared.event_types import Events
+    SHARED_AVAILABLE = True
+except ImportError:
+    # フォールバック: 相対インポート
+    try:
+        from ..shared.contracts import (
+            ServiceState,
+            normalize_service,
+            normalize_services_dict,
+            safe_service_update,
+            get_service_summary,
+            ServiceKeys
+        )
+        from ..shared.message_bus import MessageBus, get_message_bus
+        from ..shared.event_types import Events
+        SHARED_AVAILABLE = True
+    except ImportError:
+        # 最後の砦（簡易定義）
+        SHARED_AVAILABLE = False
+        from dataclasses import dataclass, field
+        
+        @dataclass
+        class ServiceState:
+            key: str
+            enabled: bool = False
+            connected: bool = False
+            name: Optional[str] = None
+            meta: Dict[str, Any] = field(default_factory=dict)
+            
+            def update_state(self, *, enabled: Optional[bool] = None, connected: Optional[bool] = None, **kwargs):
+                if enabled is not None: self.enabled = bool(enabled)
+                if connected is not None: self.connected = bool(connected)
+                if kwargs: self.meta.update(kwargs)
+            
+            def to_dict(self):
+                return {
+                    'key': self.key,
+                    'enabled': self.enabled,
+                    'connected': self.connected,
+                    'name': self.name,
+                    'meta': self.meta.copy()
+                }
+        
+        def normalize_service(key: str, raw: Any) -> ServiceState:
+            if isinstance(raw, ServiceState): return raw
+            if isinstance(raw, dict):
+                return ServiceState(
+                    key=key,
+                    enabled=bool(raw.get("enabled", False)),
+                    connected=bool(raw.get("connected", False)),
+                    name=str(raw.get("name", key))
+                )
+            return ServiceState(key=key, enabled=False, connected=False, name=key)
+        
+        def normalize_services_dict(services: Dict[str, Any]) -> Dict[str, ServiceState]:
+            return {k: normalize_service(k, v) for k, v in services.items()}
+        
+        def safe_service_update(service: ServiceState, update_data: Dict[str, Any]):
+            service.update_state(**update_data)
+        
+        def get_service_summary(services: Dict[str, ServiceState]) -> Dict[str, Any]:
+            total = len(services)
+            enabled = sum(1 for s in services.values() if s.enabled)
+            connected = sum(1 for s in services.values() if s.connected)
+            return {
+                'total_services': total,
+                'enabled_services': enabled,
+                'connected_services': connected,
+                'health_percentage': (connected / total * 100) if total > 0 else 0
+            }
+        
+        class ServiceKeys:
+            WEBSOCKET = "websocket"
+            MQTT = "mqtt"
+            ONECOMME = "onecomme"
+            MESSAGEBUS = "messagebus"
+            VOICEVOX = "voicevox"
+            BOUYOMI = "bouyomi"
+            OBS = "obs"
+        
+        class Events:
+            CONNECTION_STATUS_CHANGED = "connection_status_changed"
+            SERVICE_ERROR = "service_error"
+        
+        # ダミー関数
+        def get_message_bus():
+            return None
+
+# === SlideSwitch インポート ===
+try:
+    from .slide_switch import SlideSwitch
+except ImportError:
+    try:
+        from slide_switch import SlideSwitch
+    except ImportError:
+        # フォールバック: 基本的なCheckbox
+        class SlideSwitch:
+            def __init__(self, parent, initial_state=False, callback=None):
+                self.var = tk.BooleanVar(value=initial_state)
+                self.callback = callback
+                self.widget = ttk.Checkbutton(
+                    parent, 
+                    variable=self.var,
+                    command=self._on_change
+                )
+            
+            def _on_change(self):
+                if self.callback:
+                    self.callback(self.var.get())
+            
+            def set_state(self, state):
+                self.var.set(state)
+            
+            def pack(self, **kwargs):
+                self.widget.pack(**kwargs)
+            
+            def destroy(self):
+                self.widget.destroy()
+
+# === WebSocketManager（ONECOMME配線用） ===
+# handler.py にある管理クラスを直接利用
+try:
+    from handler import WebSocketManager
+    WEBSOCKET_MANAGER_AVAILABLE = True
+    logger.info("✅ WebSocketManager インポート成功")
+except ImportError:
+    try:
+        from ..handler import WebSocketManager
+        WEBSOCKET_MANAGER_AVAILABLE = True
+        logger.info("✅ WebSocketManager インポート成功（相対パス）")
+    except ImportError:
+        WebSocketManager = None
+        WEBSOCKET_MANAGER_AVAILABLE = False
+        logger.warning("⚠️ WebSocketManager のインポートに失敗（ONECOMME配線は無効化されます）")
+
+
+class ConnectionControlPanel(ttk.Frame):
+    """
+    接続制御パネル（WebSocket配線統合版）
+    
+    責務:
+    - サービス状態の表示
+    - スイッチUI提供
+    - イベント通知
+    - ONECOMME専用: WebSocketManager起動/停止
+    """
+    
+    def __init__(self, parent, message_bus: Optional[MessageBus] = None, service_registry=None):
+        super().__init__(parent)
+        
+        self.message_bus = message_bus
+        self.service_registry = service_registry
+        
+        # サービス状態管理（統一契約使用）
+        self.services: Dict[str, ServiceState] = {}
+        
+        # UI要素
+        self.service_switches: Dict[str, SlideSwitch] = {}
+        self.status_labels: Dict[str, ttk.Label] = {}
+        self.summary_var = tk.StringVar()
+        
+        # イベントハンドラー
+        self._connection_callbacks: Dict[str, Callable] = {}
+        
+        # 🆕 ONECOMME 用の WebSocketManager
+        self.ws_manager: Optional[WebSocketManager] = None
+        self.ws_started: bool = False
+        
+        try:
+            if WEBSOCKET_MANAGER_AVAILABLE and WebSocketManager is not None:
+                # get_message_bus が使える環境では統一バスを渡す
+                bus = self.message_bus
+                if bus is None and SHARED_AVAILABLE:
+                    bus = get_message_bus()
+                
+                if bus is not None:
+                    self.ws_manager = WebSocketManager(bus)
+                    logger.info("🔗 WebSocketManager 準備完了（ConnectionControlPanel）")
+                else:
+                    logger.warning("⚠️ MessageBus未設定のためWebSocketManager無効")
+        except Exception as e:
+            logger.warning(f"⚠️ WebSocketManager 初期化警告: {e}")
+        
+        # UI構築
+        self._setup_ui()
+        self._setup_event_handlers()
+        
+        logger.info("🎛️ ConnectionControlPanel 初期化完了（WebSocket配線統合版）")
+    
+    def _setup_ui(self):
+        """UI構築"""
+        # メインフレーム
+        main_frame = ttk.LabelFrame(self, text="🔌 接続制御", padding=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # サマリー表示
+        summary_frame = ttk.Frame(main_frame)
+        summary_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(summary_frame, text="📊 状態サマリー:").pack(side=tk.LEFT)
+        ttk.Label(summary_frame, textvariable=self.summary_var).pack(side=tk.LEFT, padx=(5, 0))
+        
+        # サービス制御エリア
+        self.services_frame = ttk.Frame(main_frame)
+        self.services_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # 初期サービス作成
+        self._create_default_services()
+    
+    def _create_default_services(self):
+        """デフォルトサービスの作成"""
+        default_services = {
+            ServiceKeys.ONECOMME: {
+                "name": "わんコメ",
+                "enabled": False,
+                "connected": False
+            },
+            ServiceKeys.MESSAGEBUS: {
+                "name": "MessageBus",
+                "enabled": False,
+                "connected": False
+            },
+            ServiceKeys.VOICEVOX: {
+                "name": "VOICEVOX",
+                "enabled": False,
+                "connected": False
+            },
+            ServiceKeys.BOUYOMI: {
+                "name": "棒読みちゃん",
+                "enabled": False,
+                "connected": False
+            },
+            ServiceKeys.OBS: {
+                "name": "OBS",
+                "enabled": False,
+                "connected": False
+            }
+        }
+        
+        self.update_services(default_services)
+    
+    def _setup_event_handlers(self):
+        """イベントハンドラー設定"""
+        if self.message_bus:
+            self.message_bus.subscribe(
+                Events.CONNECTION_STATUS_CHANGED, 
+                self._on_connection_status_changed
+            )
+            self.message_bus.subscribe(
+                Events.SERVICE_ERROR,
+                self._on_service_error
+            )
+    
+    def update_services(self, services: Dict[str, Any]):
+        """
+        サービス状態更新（統一契約版）
+        
+        Args:
+            services: 生サービス辞書（dict/オブジェクト混在OK）
+        """
+        try:
+            # 統一正規化処理
+            normalized_services = normalize_services_dict(services)
+            
+            # 既存サービスと統合
+            for key, service_state in normalized_services.items():
+                if key in self.services:
+                    # 既存サービスの更新
+                    existing = self.services[key]
+                    existing.enabled = service_state.enabled
+                    existing.connected = service_state.connected
+                    existing.meta.update(service_state.meta)
+                else:
+                    # 新規サービス追加
+                    self.services[key] = service_state
+                    self._create_service_ui(key, service_state)
+            
+            # UI更新
+            self._update_ui()
+            
+            logger.debug(f"🔄 サービス状態更新完了: {len(normalized_services)}件")
+            
+        except Exception as e:
+            logger.error(f"❌ サービス状態更新エラー: {e}")
+    
+    def _create_service_ui(self, service_key: str, service: ServiceState):
+        """個別サービスUI作成"""
+        try:
+            # サービス行フレーム
+            service_frame = ttk.Frame(self.services_frame)
+            service_frame.pack(fill=tk.X, pady=2)
+            
+            # サービス名
+            name_label = ttk.Label(
+                service_frame, 
+                text=f"{service.name or service_key}:",
+                width=15
+            )
+            name_label.pack(side=tk.LEFT, padx=(0, 10))
+            
+            # スライドスイッチ
+            switch = SlideSwitch(
+                service_frame,
+                initial_state=service.enabled,
+                callback=lambda state, key=service_key: self._on_switch_changed(key, state)
+            )
+            switch.pack(side=tk.LEFT, padx=(0, 10))
+            self.service_switches[service_key] = switch
+            
+            # 状態ラベル
+            status_label = ttk.Label(service_frame, text="")
+            status_label.pack(side=tk.LEFT, padx=(0, 10))
+            self.status_labels[service_key] = status_label
+            
+            logger.debug(f"🎨 サービスUI作成: {service_key}")
+            
+        except Exception as e:
+            logger.error(f"❌ サービスUI作成エラー ({service_key}): {e}")
+    
+    def _update_ui(self):
+        """UI状態更新"""
+        try:
+            # 各サービスUI更新
+            for key, service in self.services.items():
+                # スイッチ状態更新
+                if key in self.service_switches:
+                    switch = self.service_switches[key]
+                    switch.set_state(service.enabled)
+                
+                # 状態ラベル更新
+                if key in self.status_labels:
+                    label = self.status_labels[key]
+                    status_text, color = self._get_status_display(service)
+                    label.config(text=status_text, foreground=color)
+            
+            # サマリー更新
+            self._update_summary()
+            
+        except Exception as e:
+            logger.error(f"❌ UI更新エラー: {e}")
+    
+    def _get_status_display(self, service: ServiceState) -> tuple[str, str]:
+        """状態表示テキストと色を取得"""
+        if service.connected:
+            return "🟢 接続中", "green"
+        elif service.enabled:
+            return "🟡 接続待機", "orange"
+        else:
+            return "🔴 無効", "red"
+    
+    def _update_summary(self):
+        """サマリー表示更新"""
+        try:
+            # 統一契約のサマリー関数使用
+            summary = get_service_summary(self.services)
+            
+            summary_text = (
+                f"全体: {summary['total_services']}件 | "
+                f"有効: {summary['enabled_services']}件 | "
+                f"接続中: {summary['connected_services']}件 | "
+                f"健康度: {summary['health_percentage']:.0f}%"
+            )
+            
+            self.summary_var.set(summary_text)
+            
+        except Exception as e:
+            logger.error(f"❌ サマリー更新エラー: {e}")
+            self.summary_var.set("❌ サマリー取得エラー")
+    
+    def _on_switch_changed(self, service_key: str, enabled: bool):
+        """
+        スイッチ変更ハンドラー（WebSocket配線統合版）
+        
+        🆕 ONECOMMEスイッチでWebSocketManager起動/停止
+        """
+        try:
+            logger.info(f"🔄 スイッチ変更: {service_key} -> {'有効' if enabled else '無効'}")
+            
+            # 共通: サービス状態更新
+            if service_key in self.services:
+                self.services[service_key].enabled = enabled
+                # 無効化時は接続も切断
+                if not enabled:
+                    self.services[service_key].connected = False
+            
+            # 🆕 個別処理: ONECOMME の WebSocket 起動/停止（幹線開通）
+            if service_key == ServiceKeys.ONECOMME and self.ws_manager is not None:
+                if enabled and not self.ws_started:
+                    # わんコメWebSocket開始
+                    url = "ws://localhost:11180/sub"  # TODO: 設定値から取得に切替可能
+                    self.ws_manager.start_in_background(url)
+                    self.ws_started = True
+                    logger.info(f"🚀 わんコメWebSocket開始: {url}")
+                    
+                    # 接続状態を接続待機に更新
+                    if service_key in self.services:
+                        self.services[service_key].meta['connection_url'] = url
+                        self.services[service_key].meta['connection_time'] = time.time()
+                        
+                elif not enabled and self.ws_started:
+                    # わんコメWebSocket停止
+                    self.ws_manager.stop_background()
+                    self.ws_started = False
+                    logger.info("⏹️ わんコメWebSocket停止")
+                    
+                    # メタデータクリア
+                    if service_key in self.services:
+                        self.services[service_key].meta.clear()
+            
+            # TODO: 今後の拡張ポイント
+            # elif service_key == ServiceKeys.OBS:
+            #     # OBS接続処理をここに追加
+            # elif service_key == ServiceKeys.VOICEVOX:
+            #     # VOICEVOX接続処理をここに追加
+            
+            # 共通: MessageBusイベント通知
+            if self.message_bus:
+                self.message_bus.publish(
+                    Events.CONNECTION_STATUS_CHANGED,
+                    {
+                        'service': service_key,
+                        'enabled': enabled,
+                        'action': 'enable' if enabled else 'disable',
+                        'timestamp': time.time()
+                    },
+                    sender="ConnectionControlPanel"
+                )
+            
+            # 任意: 外部コールバック実行
+            if service_key in self._connection_callbacks:
+                try:
+                    self._connection_callbacks[service_key](service_key, enabled)
+                except Exception as e:
+                    logger.error(f"❌ コールバック実行エラー ({service_key}): {e}")
+            
+            # UI更新
+            self._update_ui()
+            
+        except Exception as e:
+            logger.error(f"❌ スイッチ変更処理エラー ({service_key}): {e}")
+    
+    def _on_connection_status_changed(self, data: Dict[str, Any], sender: str = None):
+        """接続状態変更イベントハンドラー"""
+        try:
+            service_key = data.get('service')
+            if not service_key or service_key not in self.services:
+                return
+            
+            # 統一契約による安全な更新
+            service = self.services[service_key]
+            safe_service_update(service, data)
+            
+            # UI更新
+            self.after_idle(self._update_ui)
+            
+            logger.debug(f"📡 接続状態変更受信: {service_key} from {sender}")
+            
+        except Exception as e:
+            logger.error(f"❌ 接続状態変更処理エラー: {e}")
+    
+    def _on_service_error(self, data: Dict[str, Any], sender: str = None):
+        """サービスエラーイベントハンドラー"""
+        try:
+            service_key = data.get('service')
+            error_message = data.get('error', 'Unknown error')
+            
+            logger.warning(f"⚠️ サービスエラー受信: {service_key} - {error_message}")
+            
+            # エラー時はスイッチを無効化
+            if service_key in self.services:
+                self.services[service_key].enabled = False
+                self.services[service_key].connected = False
+                self.services[service_key].meta['last_error'] = error_message
+                self.services[service_key].meta['error_time'] = time.time()
+                
+                # WebSocket関連のエラーの場合は内部状態もリセット
+                if service_key == ServiceKeys.ONECOMME:
+                    self.ws_started = False
+                
+                self.after_idle(self._update_ui)
+            
+        except Exception as e:
+            logger.error(f"❌ サービスエラー処理エラー: {e}")
+    
+    # === 公開API ===
+    
+    def set_connection_callback(self, service_key: str, callback: Callable[[str, bool], None]):
+        """接続コールバック設定"""
+        self._connection_callbacks[service_key] = callback
+        logger.debug(f"🔗 コールバック設定: {service_key}")
+    
+    def get_service_state(self, service_key: str) -> Optional[ServiceState]:
+        """サービス状態取得"""
+        return self.services.get(service_key)
+    
+    def get_all_services(self) -> Dict[str, ServiceState]:
+        """全サービス状態取得"""
+        return self.services.copy()
+    
+    def set_service_enabled(self, service_key: str, enabled: bool):
+        """プログラムからのサービス有効/無効設定"""
+        try:
+            if service_key in self.services:
+                self.services[service_key].enabled = enabled
+                
+                # スイッチUI更新
+                if service_key in self.service_switches:
+                    self.service_switches[service_key].set_state(enabled)
+                
+                self._update_ui()
+                logger.info(f"📝 プログラム設定: {service_key} -> {'有効' if enabled else '無効'}")
+            else:
+                logger.warning(f"⚠️ 存在しないサービス: {service_key}")
+                
+        except Exception as e:
+            logger.error(f"❌ サービス設定エラー ({service_key}): {e}")
+    
+    def set_service_connected(self, service_key: str, connected: bool):
+        """プログラムからの接続状態設定"""
+        try:
+            if service_key in self.services:
+                self.services[service_key].connected = connected
+                self._update_ui()
+                logger.debug(f"🔌 接続状態設定: {service_key} -> {'接続' if connected else '切断'}")
+            else:
+                logger.warning(f"⚠️ 存在しないサービス: {service_key}")
+                
+        except Exception as e:
+            logger.error(f"❌ 接続状態設定エラー ({service_key}): {e}")
+    
+    def get_websocket_status(self) -> Dict[str, Any]:
+        """WebSocket関連の状態取得"""
+        try:
+            status = {
+                'websocket_manager_available': WEBSOCKET_MANAGER_AVAILABLE,
+                'ws_manager_initialized': self.ws_manager is not None,
+                'ws_started': self.ws_started,
+                'onecomme_service_state': self.get_service_state(ServiceKeys.ONECOMME).to_dict() if ServiceKeys.ONECOMME in self.services else None
+            }
+            
+            if self.ws_manager:
+                try:
+                    ws_status = self.ws_manager.get_status()
+                    status['websocket_manager_status'] = ws_status
+                except Exception as e:
+                    status['websocket_manager_error'] = str(e)
+            
+            return status
+            
+        except Exception as e:
+            logger.error(f"❌ WebSocket状態取得エラー: {e}")
+            return {'error': str(e)}
+    
+    def cleanup(self):
+        """リソース解放"""
+        try:
+            # WebSocketManager停止
+            if self.ws_manager and self.ws_started:
+                try:
+                    self.ws_manager.stop_background()
+                    self.ws_started = False
+                    logger.info("🔌 WebSocketManager停止完了")
+                except Exception as e:
+                    logger.warning(f"⚠️ WebSocketManager停止警告: {e}")
+            
+            # イベント購読解除
+            if self.message_bus:
+                try:
+                    self.message_bus.unsubscribe(
+                        Events.CONNECTION_STATUS_CHANGED,
+                        self._on_connection_status_changed
+                    )
+                    self.message_bus.unsubscribe(
+                        Events.SERVICE_ERROR,
+                        self._on_service_error
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ イベント購読解除警告: {e}")
+            
+            # UI要素クリーンアップ
+            self.service_switches.clear()
+            self.status_labels.clear()
+            self._connection_callbacks.clear()
+            
+            logger.info("🗑️ ConnectionControlPanel リソース解放完了")
+            
+        except Exception as e:
+            logger.error(f"❌ リソース解放エラー: {e}")
+    
+    def destroy(self):
+        """ウィジェット破棄"""
+        try:
+            # クリーンアップ実行
+            self.cleanup()
+            
+            # 親クラスの destroy
+            super().destroy()
+            
+        except Exception as e:
+            logger.error(f"❌ ウィジェット破棄エラー: {e}")
+
+
+# === 便利な作成関数 ===
+
+def create_connection_panel(parent, message_bus: Optional[MessageBus] = None, 
+                          service_registry=None, **kwargs) -> ConnectionControlPanel:
+    """
+    ConnectionControlPanel作成便利関数（WebSocket配線統合版）
+    
+    Args:
+        parent: 親ウィジェット
+        message_bus: メッセージバス
+        service_registry: サービスレジストリ
+        **kwargs: 追加引数
+        
+    Returns:
+        ConnectionControlPanel: 作成されたパネル
+    """
+    try:
+        panel = ConnectionControlPanel(parent, message_bus, service_registry)
+        logger.info("✅ ConnectionControlPanel作成完了（WebSocket配線統合版）")
+        return panel
+    except Exception as e:
+        logger.error(f"❌ ConnectionControlPanel作成エラー: {e}")
+        raise
+
+
+# === テスト実行（任意） ===
+
+if __name__ == "__main__":
+    def test_callback(service_key: str, enabled: bool):
+        logger.info(f"🔗 テストコールバック: {service_key} -> {'有効' if enabled else '無効'}")
+    
+    # テスト用ウィンドウ
+    root = tk.Tk()
+    root.title("ConnectionControlPanel WebSocket配線統合版テスト")
+    root.geometry("700x400")
+    
+    # メッセージバス（テスト用）
+    try:
+        if SHARED_AVAILABLE:
+            bus = get_message_bus()
+        else:
+            # フォールバック: ダミーバス
+            class DummyBus:
+                def subscribe(self, event, callback): pass
+                def publish(self, event, data, sender=None): pass
+                def stop(self): pass
+            bus = DummyBus()
+    except Exception:
+        # フォールバック: ダミーバス
+        class DummyBus:
+            def subscribe(self, event, callback): pass
+            def publish(self, event, data, sender=None): pass
+            def stop(self): pass
+        bus = DummyBus()
+    
+    # パネル作成
+    panel = ConnectionControlPanel(root, bus)
+    panel.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    
+    # テストサービス追加
+    test_services = {
+        'onecomme': {'name': 'わんコメ', 'enabled': False, 'connected': False},
+        'messagebus': {'name': 'MessageBus', 'enabled': True, 'connected': True},
+        'voicevox': {'name': 'VOICEVOX', 'enabled': False, 'connected': False}
+    }
+    
+    panel.update_services(test_services)
+    
+    # コールバック設定
+    for key in test_services.keys():
+        panel.set_connection_callback(key, test_callback)
+    
+    # WebSocket状態表示（デバッグ用）
+    def show_websocket_status():
+        try:
+            status = panel.get_websocket_status()
+            logger.info(f"🔌 WebSocket状態: {status}")
+            root.after(5000, show_websocket_status)  # 5秒ごと
+        except Exception as e:
+            logger.error(f"❌ WebSocket状態表示エラー: {e}")
+    
+    root.after(1000, show_websocket_status)
+    
+    try:
+        logger.info("🚀 ConnectionControlPanel WebSocket配線統合版テスト開始")
+        root.mainloop()
+    except Exception as e:
+        logger.error(f"❌ テスト実行エラー: {e}")
+    finally:
+        try:
+            panel.cleanup()
+            if hasattr(bus, 'stop'):
+                bus.stop()
+        except:
+            pass
+        logger.info("✅ ConnectionControlPanel WebSocket配線統合版テスト完了")

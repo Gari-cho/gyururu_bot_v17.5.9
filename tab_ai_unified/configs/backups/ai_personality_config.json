@@ -1,0 +1,30 @@
+{
+  "basic_info": {
+    "name": "",
+    "age": "",
+    "personality": "",
+    "background": "",
+    "speaking_style": ""
+  },
+  "response_patterns": {
+    "greeting": [],
+    "thanks": [],
+    "goodbye": [],
+    "reaction_positive": [],
+    "reaction_negative": []
+  },
+  "behavior_settings": {
+    "response_frequency": 0.3,
+    "emotional_variance": 0.5,
+    "memory_retention": true,
+    "learning_enabled": false,
+    "auto_responses": true
+  },
+  "advanced_settings": {
+    "context_awareness": true,
+    "mood_simulation": false,
+    "personality_drift": 0.1,
+    "response_delay": 0.5,
+    "conversation_memory_limit": 100
+  }
+}
