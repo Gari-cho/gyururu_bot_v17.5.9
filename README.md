@@ -2,7 +2,9 @@
 
 このリポジトリは、配信支援ツール
 **「ぎゅるるボット」** の **β版公開リポジトリ** です。
+
 👉️https://github.com/Gari-cho/gyururu_bot_v17.5.9/releases/
+
 こちらにて.exe版を公開しています。
 
 ---
